@@ -492,6 +492,22 @@ function Invoke-RgList {
   return @($output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
 
+function Find-UltraSliderTarget {
+  param(
+    [string]$RgPath,
+    [string]$AssetsDir
+  )
+  foreach ($candidate in (Invoke-RgList $RgPath 'model_picker_persists_ultra_effort' $AssetsDir)) {
+    $text = Get-Content -Raw -LiteralPath $candidate
+    if ($text.Contains('chatgpt-user-settings') -and
+        $text.Contains('showUltraInModelPickerSlider') -and
+        ($text.Contains('setUltraEffortEnabled') -or $text.Contains('CODEX_ULTRA_LOCAL_FALLBACK_V1'))) {
+      return $candidate
+    }
+  }
+  return $null
+}
+
 function Write-PatcherFiles {
   param([string]$WorkDir)
 
@@ -499,6 +515,7 @@ function Write-PatcherFiles {
   $fastUiPatcherPath = Join-Path $WorkDir 'PatchFastModeUi.cjs'
   $customModelsPatcherPath = Join-Path $WorkDir 'PatchCustomModels.cjs'
   $powerSliderPatcherPath = Join-Path $WorkDir 'PatchPowerSlider.cjs'
+  $ultraSliderPatcherPath = Join-Path $WorkDir 'PatchUltraSliderLocalFallback.cjs'
   $localePatcherPath = Join-Path $WorkDir 'PatchLocaleI18n.cjs'
   $pluginsPatcherPath = Join-Path $WorkDir 'PatchPlugins.cjs'
   $goalPatcherPath = Join-Path $WorkDir 'PatchGoal.cjs'
@@ -682,6 +699,77 @@ const replacement = `function ${fn}({harborEnabled:${harborEnabled},isElectron:$
 const next = text.replace(gateRe, replacement);
 if (!next.includes(marker)) {
   process.stderr.write('power-slider-patch-verification-failed\n');
+  process.exit(2);
+}
+fs.writeFileSync(file, next);
+process.stdout.write('patched');
+'@
+
+  Set-Content -LiteralPath $ultraSliderPatcherPath -Encoding UTF8 -Value @'
+const fs = require('node:fs');
+const file = process.argv[2];
+const marker = 'CODEX_ULTRA_LOCAL_FALLBACK_V1';
+const migrationMarker = 'CODEX_ULTRA_LOCAL_FALLBACK_V1_MIGRATION';
+
+if (!file || file === '__none__') {
+  process.stdout.write('not-applicable');
+  process.exit(0);
+}
+
+const text = fs.readFileSync(file, 'utf8');
+if (text.includes(marker) && text.includes(migrationMarker) && text.includes('ultraEffortLocalFallback')) {
+  process.stdout.write('already-patched');
+  process.exit(0);
+}
+
+const readConfigMatch = text.match(/([$A-Za-z_][$\w]*)\(([$A-Za-z_][$\w]*)\.showUltraInModelPickerSlider\)\.catch\(\(\)=>!1\)/);
+const writeConfigMatch = text.match(/await ([$A-Za-z_][$\w]*)\(([$A-Za-z_][$\w]*),([$A-Za-z_][$\w]*)\.showUltraInModelPickerSlider,!1\)\.catch\(\(\)=>\{\}\)/);
+if (!readConfigMatch || !writeConfigMatch || readConfigMatch[2] !== writeConfigMatch[3]) {
+  process.stderr.write('ultra-local-config-helper-target-not-found\n');
+  process.exit(2);
+}
+const readConfig = readConfigMatch[1];
+const settings = readConfigMatch[2];
+const writeConfig = writeConfigMatch[1];
+
+const mutationRe = /async function ([$A-Za-z_][$\w]*)\(([$A-Za-z_][$\w]*),([$A-Za-z_][$\w]*)\)\{let ([$A-Za-z_][$\w]*)=\2\.query\.snapshot\(([$A-Za-z_][$\w]*)\),([$A-Za-z_][$\w]*)=\4\.getData\(\);\4\.setData\(([$A-Za-z_][$\w]*)=>\7==null\?\7:\{\.\.\.\7,ultraEffortEnabled:\3\}\);try\{await \2\.get\(([$A-Za-z_][$\w]*)\)\.setUltraEffortEnabled\(\3\),await Promise\.all\(\[\4\.invalidate\(\),\2\.query\.snapshot\(([$A-Za-z_][$\w]*)\)\.invalidate\(\)\]\)\}catch\(([$A-Za-z_][$\w]*)\)\{throw \4\.setData\(\6\),\10\}\}/;
+const mutationMatch = text.match(mutationRe);
+if (!mutationMatch) {
+  process.stderr.write('ultra-mutation-target-not-found\n');
+  process.exit(2);
+}
+const [, mutationFn, mutationScope, enabled, snapshot, userSettingsQuery, previous, cached, client, tppQuery] = mutationMatch;
+const mutationReplacement = `async function ${mutationFn}(${mutationScope},${enabled}){let ${snapshot}=${mutationScope}.query.snapshot(${userSettingsQuery}),${previous}=${snapshot}.getData();${snapshot}.setData(${cached}=>${cached}==null?${cached}:{...${cached},ultraEffortEnabled:${enabled}});if(${previous}?.ultraEffortLocalFallback===!0){try{await ${writeConfig}(${mutationScope},${settings}.showUltraInModelPickerSlider,${enabled});return}catch(codexUltraLocalError){throw ${snapshot}.setData(${previous}),codexUltraLocalError}}try{await ${mutationScope}.get(${client}).setUltraEffortEnabled(${enabled}),await Promise.all([${snapshot}.invalidate(),${mutationScope}.query.snapshot(${tppQuery}).invalidate()])}catch(codexUltraRemoteError){throw ${snapshot}.setData(${previous}),codexUltraRemoteError}}`;
+let next = text.replace(mutationRe, mutationReplacement);
+
+const queryRe = /queryFn:async\(\)=>\{let ([$A-Za-z_][$\w]*)=([$A-Za-z_][$\w]*)\.parse\(await ([$A-Za-z_][$\w]*)\.get\(([$A-Za-z_][$\w]*)\)\.userSettings\(\)\);return\{lockdownModeEnabled:\1\.settings\?\.lockdown_mode_enabled===!0,ultraEffortEnabled:\1\.settings\?\.model_picker_persists_ultra_effort===!0\}\}/;
+const queryMatch = next.match(queryRe);
+if (!queryMatch) {
+  process.stderr.write('ultra-user-settings-query-target-not-found\n');
+  process.exit(2);
+}
+const [, parsed, schema, queryScope, queryClient] = queryMatch;
+const queryReplacement = `queryFn:async()=>{try{let ${parsed}=${schema}.parse(await ${queryScope}.get(${queryClient}).userSettings());return{lockdownModeEnabled:${parsed}.settings?.lockdown_mode_enabled===!0,ultraEffortEnabled:${parsed}.settings?.model_picker_persists_ultra_effort===!0}}catch{return{lockdownModeEnabled:!1,ultraEffortEnabled:await ${readConfig}(${settings}.showUltraInModelPickerSlider).catch(()=>!1)===!0,ultraEffortLocalFallback:!0/*${marker}*/}}}`;
+next = next.replace(queryRe, queryReplacement);
+
+const migrationKey = 'queryKey:[`chatgpt-ultra-effort-migration`]';
+const migrationKeyIndex = next.indexOf(migrationKey);
+if (migrationKeyIndex < 0) {
+  process.stderr.write('ultra-migration-query-target-not-found\n');
+  process.exit(2);
+}
+const migrationStart = Math.max(0, migrationKeyIndex - 1200);
+const migrationPrefix = next.slice(0, migrationStart);
+const migrationSegment = next.slice(migrationStart, migrationKeyIndex + migrationKey.length);
+const migrationOriginal = '.setUltraEffortEnabled(!0).catch(()=>{})';
+if (!migrationSegment.includes(migrationOriginal)) {
+  process.stderr.write('ultra-migration-swallowed-error-target-not-found\n');
+  process.exit(2);
+}
+next = migrationPrefix + migrationSegment.replace(migrationOriginal, `.setUltraEffortEnabled(!0)/*${migrationMarker}*/`) + next.slice(migrationKeyIndex + migrationKey.length);
+
+if (!next.includes(marker) || !next.includes(migrationMarker) || !next.includes('ultraEffortLocalFallback')) {
+  process.stderr.write('ultra-local-fallback-patch-verification-failed\n');
   process.exit(2);
 }
 fs.writeFileSync(file, next);
@@ -1228,6 +1316,7 @@ if (changed) {
     FastUi = $fastUiPatcherPath
     CustomModels = $customModelsPatcherPath
     PowerSlider = $powerSliderPatcherPath
+    UltraSlider = $ultraSliderPatcherPath
     LocaleI18n = $localePatcherPath
     Plugins = $pluginsPatcherPath
     Goal = $goalPatcherPath
@@ -1335,6 +1424,7 @@ function Find-PatchTargets {
   if ([string]::IsNullOrWhiteSpace($powerSliderTarget)) {
     Fail 'could not find compact Power slider harbor gate in extracted assets'
   }
+  $ultraSliderTarget = Find-UltraSliderTarget $RgPath $assetsDir
   $localeI18nTarget = $null
   $localeCandidates = @(
     Invoke-RgList $RgPath 'enable_i18n' $assetsDir
@@ -1599,6 +1689,7 @@ function Find-PatchTargets {
   Write-Log "fast-mode UI patch target: $fastModeUiTarget"
   Write-Log "custom models patch target: $customModelsTarget"
   Write-Log "Power slider patch target: $powerSliderTarget"
+  Write-Log "Ultra slider local-fallback patch target: $ultraSliderTarget"
   Write-Log "locale i18n patch target: $localeI18nTarget"
   Write-Log "plugin sidebar patch target: $pluginSidebarTarget"
   Write-Log "plugin skills-page patch target: $pluginSkillsTarget"
@@ -1620,6 +1711,7 @@ function Find-PatchTargets {
     FastModeUi = $fastModeUiTarget
     CustomModels = $customModelsTarget
     PowerSlider = $powerSliderTarget
+    UltraSlider = $ultraSliderTarget
     LocaleI18n = $localeI18nTarget
     PluginSidebar = $pluginSidebarTarget
     PluginSkills = $pluginSkillsTarget
@@ -1773,10 +1865,12 @@ function Invoke-PatchAppAsar {
     if ([string]::IsNullOrWhiteSpace($powerSliderTarget)) {
       Fail 'could not find Model Experience compact Power slider harbor gate'
     }
+    $ultraSliderTarget = Find-UltraSliderTarget $rgPath $assetsDir
     Write-Log "Model Experience Fast Mode request target: $fastModeTarget"
     Write-Log "Model Experience Fast Mode UI target: $fastModeUiTarget"
     Write-Log "Model Experience custom models target: $customModelsTarget"
     Write-Log "Model Experience Power slider target: $powerSliderTarget"
+    Write-Log "Model Experience Ultra slider local-fallback target: $ultraSliderTarget"
     $fastModeResult = Invoke-NodePatcher $nodePath $patchers.Fast @($fastModeTarget)
     Write-Log "Model Experience Fast Mode request result: $fastModeResult"
     $fastModeUiResult = Invoke-NodePatcher $nodePath $patchers.FastUi @($fastModeUiTarget)
@@ -1785,7 +1879,9 @@ function Invoke-PatchAppAsar {
     Write-Log "Model Experience custom models result: $customModelsResult ($($CustomModels -join ', '))"
     $powerSliderResult = Invoke-NodePatcher $nodePath $patchers.PowerSlider @($powerSliderTarget)
     Write-Log "Model Experience Power slider result: $powerSliderResult"
-    foreach ($syntaxTarget in @($fastModeTarget, $fastModeUiTarget, $customModelsTarget, $powerSliderTarget)) {
+    $ultraSliderResult = Invoke-NodePatcher $nodePath $patchers.UltraSlider @($(if ([string]::IsNullOrWhiteSpace($ultraSliderTarget)) { '__none__' } else { $ultraSliderTarget }))
+    Write-Log "Model Experience Ultra slider local-fallback result: $ultraSliderResult"
+    foreach ($syntaxTarget in @($fastModeTarget, $fastModeUiTarget, $customModelsTarget, $powerSliderTarget, $ultraSliderTarget) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique) {
       & $nodePath --check $syntaxTarget
       if ($LASTEXITCODE -ne 0) {
         Fail "Model Experience patched asset failed node --check: $syntaxTarget"
@@ -1800,7 +1896,8 @@ function Invoke-PatchAppAsar {
     if ($fastModeResult -eq 'already-patched' -and
         $fastModeUiResult -eq 'already-patched' -and
         $customModelsResult -eq 'already-patched' -and
-        $powerSliderResult -eq 'already-patched') {
+        $powerSliderResult -eq 'already-patched' -and
+        $ultraSliderResult -in @('already-patched', 'not-applicable')) {
       Write-Log 'asar Model Experience patches already present'
       return $false
     }
@@ -1856,6 +1953,8 @@ function Invoke-PatchAppAsar {
   Write-Log "custom models patch result: $customModels ($($CustomModels -join ', '))"
   $powerSlider = Invoke-NodePatcher $nodePath $patchers.PowerSlider @($targets.PowerSlider)
   Write-Log "Power slider patch result: $powerSlider"
+  $ultraSlider = Invoke-NodePatcher $nodePath $patchers.UltraSlider @($(if ([string]::IsNullOrWhiteSpace($targets.UltraSlider)) { '__none__' } else { [string]$targets.UltraSlider }))
+  Write-Log "Ultra slider local-fallback patch result: $ultraSlider"
 
   $localeI18n = Invoke-NodePatcher $nodePath $patchers.LocaleI18n @($targets.LocaleI18n)
   Write-Log "locale i18n patch result: $localeI18n"
@@ -1894,6 +1993,7 @@ function Invoke-PatchAppAsar {
       $fastUi -eq 'already-patched' -and
       $customModels -eq 'already-patched' -and
       $powerSlider -eq 'already-patched' -and
+      $ultraSlider -in @('already-patched', 'not-applicable') -and
       $localeI18n -eq 'already-patched' -and
       $plugins -eq 'already-patched' -and
       $goal -eq 'already-patched' -and

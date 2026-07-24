@@ -10,6 +10,7 @@ Symptoms:
 - A local smoke test returns an answer such as `FAST_CHECK_OK`.
 - CLI or `/v1/models` exposes a model, but the Desktop picker still hides it.
 - The compact blue-purple Power slider falls back to the legacy Model / Reasoning / Speed picker because the required Sol/Terra model and reasoning combinations were filtered out.
+- The compact slider is present and models advertise Ultra, but Settings -> Configuration -> "Ultra in model picker slider" is disabled under `openai-custom`. In current builds the control can still depend on ChatGPT `userSettings()` and `setUltraEffortEnabled()` even though the models themselves come from the local app-server.
 
 Checks:
 
@@ -19,12 +20,14 @@ Checks:
 - In newer Codex builds, inspect `webview\assets\read-service-tier-for-request-*.js`. A shape like `return authMethod===\`chatgpt\` ? featureRequirements?.fast_mode !== false : false` means API-key/local requests are still forced out of Fast Mode.
 - Inspect `webview\assets\use-service-tier-settings-*.js` independently; Fast request wiring can be correct while the UI gate remains closed, or the UI can be open while request wiring is still wrong.
 - Inspect `webview\assets\model-list-filter-*.js` for Statsig-driven `available_models` filtering. Provider discovery can succeed while the frontend still removes the model before the Power slider calculates its available combinations.
+- Inspect the asset containing `chatgpt-user-settings`, `model_picker_persists_ultra_effort`, and `showUltraInModelPickerSlider`. A settings control shaped like `disabled: data == null || mutation.isPending` is permanently disabled when a custom provider has no ChatGPT account user-settings response. The local TOML key alone is not enough if the build uses it only as a one-time migration flag.
 - Codex Desktop `26.721.3996.0` can merge the Fast UI gate and model-list filter into `webview\assets\app-initial-*.js`. Match the same stable behavior (`isServiceTierAllowed`, `available_models`, `useHiddenModels`, and `supportedReasoningEfforts`) before concluding that the gate was removed.
 
 Action:
 
 - For CPA, add an override rule for the Codex-facing model names and force `service_tier` as a string value of `priority`.
 - Patch the Fast Mode gate by removing the `chatgpt`-only branch while preserving the feature-requirement lookup, then rerun wire capture.
+- Patch Ultra persistence with a guarded fallback: keep the official account API for successful ChatGPT user-settings queries, but on query failure return a local-backed state, write `show-ultra-in-model-picker-slider` locally, and do not let the one-time migration clear that local value after a failed remote write. Verify both the toggle state after restart and Ultra's presence in the actual compact slider.
 - Run the unified Model Experience dry run so the request gate, UI gate, and model filter are checked separately and only broken components are changed:
 
 ```powershell

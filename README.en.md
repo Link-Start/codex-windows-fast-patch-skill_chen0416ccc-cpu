@@ -8,7 +8,7 @@ This is the public version of the `codex-windows-fast-patch` skill. It helps Age
 
 Use this skill when Windows Codex Desktop updates cause issues like these:
 
-- Fix missing Fast Mode, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna models, and the blue-purple Power slider.
+- Fix missing Fast Mode, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna models, the blue-purple Power slider, and its disabled Ultra toggle under custom providers.
 - Repair the UI language resetting to English after restart.
 - Repair plugin entries, plugin install buttons, and plugin marketplace lists.
 - Repair the in-app browser, browser pane, Chrome, or browser_use when they are unavailable.
