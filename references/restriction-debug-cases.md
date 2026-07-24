@@ -19,6 +19,7 @@ Checks:
 - In newer Codex builds, inspect `webview\assets\read-service-tier-for-request-*.js`. A shape like `return authMethod===\`chatgpt\` ? featureRequirements?.fast_mode !== false : false` means API-key/local requests are still forced out of Fast Mode.
 - Inspect `webview\assets\use-service-tier-settings-*.js` independently; Fast request wiring can be correct while the UI gate remains closed, or the UI can be open while request wiring is still wrong.
 - Inspect `webview\assets\model-list-filter-*.js` for Statsig-driven `available_models` filtering. Provider discovery can succeed while the frontend still removes the model before the Power slider calculates its available combinations.
+- Codex Desktop `26.721.3996.0` can merge the Fast UI gate and model-list filter into `webview\assets\app-initial-*.js`. Match the same stable behavior (`isServiceTierAllowed`, `available_models`, `useHiddenModels`, and `supportedReasoningEfforts`) before concluding that the gate was removed.
 
 Action:
 
@@ -43,6 +44,7 @@ Symptoms:
 Checks:
 
 - Search extracted ASAR webview assets by stable code behavior instead of fixed filenames.
+- In Codex Desktop `26.721.3996.0`, Browser sidebar availability can also move into `webview\assets\app-initial-*.js`; identify it by `in_app_browser`, the experimental-features query, and the `enabled !== false` result rather than by the old `browser-sidebar-availability-*` filename.
 - For Computer Use, relevant patterns include `featureName:\`computer_use\``, Statsig gate `1506311413`, `installPlugin:async`, and `openPluginInstall`.
 - If old plugin gate markers such as `533078438` or `pluginDeepLinkAuthBlocked` are gone, inspect `webview\assets\plugins-page-*.js` for `openPluginInstall`, `authMethod:`, and an auth-blocked assignment shaped like `{authMethod:x}=..., y=authBlocked(x),`.
 
@@ -51,6 +53,7 @@ Action:
 - Patch the extracted ASAR through the MSIX repack workflow.
 - Do not edit `C:\Program Files\WindowsApps` in place.
 - Update script search logic when asset filenames drift between Codex Desktop versions.
+- If the unified command registry scores `title`, `id`, and `searchAliases`, `/goal` already matches the Goal command id and the legacy slash-command scorer does not need patching.
 - For the newer plugin page auth shape, force only the local auth-blocked variable to `false`; do not require the old sidebar, skills-page, and detail-page chunks to exist.
 
 ## New Chat Fails With Missing inputSchema

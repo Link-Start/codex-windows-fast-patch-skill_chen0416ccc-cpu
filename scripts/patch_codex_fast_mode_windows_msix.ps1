@@ -622,16 +622,30 @@ if (text.includes(marker) && models.every((model) => text.includes(model))) {
   process.exit(0);
 }
 
-const visibilityRe = /if\(([$A-Za-z_][$\w]*)\?([$A-Za-z_][$\w]*)\.has\(([$A-Za-z_][$\w]*)\.model\):!\3\.hidden\)\{/;
-const match = text.match(visibilityRe);
+const visibilityPatterns = [
+  {
+    re: /if\(([$A-Za-z_][$\w]*)\?([$A-Za-z_][$\w]*)\.has\(([$A-Za-z_][$\w]*)\.model\):!\3\.hidden\)\{/,
+    modelGroup: 3,
+  },
+  {
+    re: /if\(([$A-Za-z_][$\w]*)\?\.has\(([$A-Za-z_][$\w]*)\.model\)===!0\|\|\(([$A-Za-z_][$\w]*)\?([$A-Za-z_][$\w]*)\.has\(\2\.model\):!\2\.hidden\)\)\{/,
+    modelGroup: 2,
+  },
+];
+const target = visibilityPatterns
+  .map(({ re, modelGroup }) => ({ match: text.match(re), modelGroup }))
+  .find(({ match }) => match != null);
+const match = target?.match;
 if (!match) {
   process.stderr.write('custom-model-visibility-target-not-found\n');
   process.exit(2);
 }
 
 const forced = JSON.stringify(models);
-const replacement = `if(/*${marker}*/${forced}.includes(${match[3]}.model)||(${match[1]}?${match[2]}.has(${match[3]}.model):!${match[3]}.hidden)){`;
-const next = text.replace(visibilityRe, replacement);
+const modelVar = match[target.modelGroup];
+const originalCondition = match[0].slice(3, -2);
+const replacement = `if(/*${marker}*/${forced}.includes(${modelVar}.model)||(${originalCondition})){`;
+const next = text.replace(match[0], replacement);
 if (!next.includes(marker) || !models.every((model) => next.includes(model))) {
   process.stderr.write('custom-model-patch-verification-failed\n');
   process.exit(2);
@@ -832,6 +846,10 @@ if (!nextSlash.includes(slashPatched) && !slashPatchedRe.test(nextSlash)) {
     changedSlash = true;
   } else if (cmdkSlashRe.test(nextSlash) && (cmdkKeywordSearchRe.test(nextSlash) || nextSlash.includes('keywords:r'))) {
     // Codex 26.519+ moved slash filtering to cmdk keywords; command id matching is already handled there.
+  } else if (nextSlash.includes('id:`goal`') &&
+             nextSlash.includes('getSearchQuery') &&
+             /Math\.max\([A-Za-z_$][\w$]*\(e\.title,[A-Za-z_$][\w$]*\),[A-Za-z_$][\w$]*\(e\.id,[A-Za-z_$][\w$]*\),\.\.\.\(e\.searchAliases\?\?\[\]\)\.map/.test(nextSlash)) {
+    // Current unified command registry scores title, id, and aliases, so /goal is already searchable by id.
   } else if (nextSlash.includes('sourceMappingURL=slash-command-item') &&
              !nextSlash.includes('score:') &&
              !nextSlash.includes('e.command.group??null')) {
@@ -1257,6 +1275,18 @@ function Find-PatchTargets {
       break
     }
   }
+  if ([string]::IsNullOrWhiteSpace($fastModeUiTarget)) {
+    foreach ($candidate in (Get-ChildItem -LiteralPath $assetsDir -Filter 'app-initial-*.js' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)) {
+      $text = Get-Content -Raw -LiteralPath $candidate
+      if ($text.Contains('isServiceTierAllowed') -and
+          $text.Contains('featureRequirements?.fast_mode') -and
+          (($text -match '=!!\w+\?\.isLoading\|\|\w+&&\w+,\w+=\w+&&!\w+&&\w+!=null&&\w+\?\.requirements\?\.featureRequirements\?\.fast_mode!==!1') -or
+           ($text -match '=!!\w+\?\.isLoading\|\|\w+,\w+=!\w+&&\w+!=null&&\w+\?\.requirements\?\.featureRequirements\?\.fast_mode!==!1'))) {
+        $fastModeUiTarget = $candidate
+        break
+      }
+    }
+  }
   $customModelsTarget = $null
   foreach ($candidate in (Get-ChildItem -LiteralPath $assetsDir -Filter 'model-list-filter-*.js' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)) {
     $text = Get-Content -Raw -LiteralPath $candidate
@@ -1264,6 +1294,19 @@ function Find-PatchTargets {
         $text.Contains('supportedReasoningEfforts')) {
       $customModelsTarget = $candidate
       break
+    }
+  }
+  if ([string]::IsNullOrWhiteSpace($customModelsTarget)) {
+    foreach ($candidate in (Get-ChildItem -LiteralPath $assetsDir -Filter 'app-initial-*.js' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)) {
+      $text = Get-Content -Raw -LiteralPath $candidate
+      if ($text.Contains('available_models') -and
+          $text.Contains('useHiddenModels') -and
+          $text.Contains('supportedReasoningEfforts') -and
+          (($text -match '\?\.has\(\w+\.model\)===!0\|\|\(\w+\?\w+\.has\(\w+\.model\):!\w+\.hidden\)') -or
+           $text.Contains('CODEX_CUSTOM_MODELS_V1'))) {
+        $customModelsTarget = $candidate
+        break
+      }
     }
   }
   if ([string]::IsNullOrWhiteSpace($customModelsTarget)) {
@@ -1320,6 +1363,18 @@ function Find-PatchTargets {
     if ($text.Contains('in_app_browser')) {
       $browserSidebarAvailabilityTarget = $candidate
       break
+    }
+  }
+  if ([string]::IsNullOrWhiteSpace($browserSidebarAvailabilityTarget)) {
+    foreach ($candidate in (Get-ChildItem -LiteralPath $assetsDir -Filter 'app-initial-*.js' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)) {
+      $text = Get-Content -Raw -LiteralPath $candidate
+      if ($text.Contains('in_app_browser') -and
+          $text.Contains('experimental-features') -and
+          (($text -match '`in_app_browser`,\w+=\w+\(\w+,\(\{get:\w+\}\)=>\{let\{data:\w+\}=.+?;return \w+!=null&&\w+\?\.enabled!==!1\}\)') -or
+           ($text -match '`in_app_browser`,\w+=\w+\(\w+,\(\)=>!0\)'))) {
+        $browserSidebarAvailabilityTarget = $candidate
+        break
+      }
     }
   }
   $desktopFeatureSenderTarget = $null
@@ -1457,6 +1512,17 @@ function Find-PatchTargets {
             ($text -match 'score:[A-Za-z_$][\w$]*\(e\.title,\w+\)')) -and
            $text.Contains('e.command.group??null') -and
            $text.Contains('requiresEmptyComposer'))) {
+        $goalSlashTarget = $candidate
+        break
+      }
+    }
+  }
+  if ([string]::IsNullOrWhiteSpace($goalSlashTarget)) {
+    foreach ($candidate in (Get-ChildItem -LiteralPath $assetsDir -Filter 'app-initial-*.js' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)) {
+      $text = Get-Content -Raw -LiteralPath $candidate
+      if ($text.Contains('id:`goal`') -and
+          $text.Contains('getSearchQuery') -and
+          $text -match 'Math\.max\([A-Za-z_$][\w$]*\(e\.title,[A-Za-z_$][\w$]*\),[A-Za-z_$][\w$]*\(e\.id,[A-Za-z_$][\w$]*\),\.\.\.\(e\.searchAliases\?\?\[\]\)\.map') {
         $goalSlashTarget = $candidate
         break
       }
@@ -1644,6 +1710,18 @@ function Invoke-PatchAppAsar {
       }
     }
     if ([string]::IsNullOrWhiteSpace($fastModeUiTarget)) {
+      foreach ($candidate in (Get-ChildItem -LiteralPath $assetsDir -Filter 'app-initial-*.js' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)) {
+        $text = Get-Content -Raw -LiteralPath $candidate
+        if ($text.Contains('isServiceTierAllowed') -and
+            $text.Contains('featureRequirements?.fast_mode') -and
+            (($text -match '=!!\w+\?\.isLoading\|\|\w+&&\w+,\w+=\w+&&!\w+&&\w+!=null&&\w+\?\.requirements\?\.featureRequirements\?\.fast_mode!==!1') -or
+             ($text -match '=!!\w+\?\.isLoading\|\|\w+,\w+=!\w+&&\w+!=null&&\w+\?\.requirements\?\.featureRequirements\?\.fast_mode!==!1'))) {
+          $fastModeUiTarget = $candidate
+          break
+        }
+      }
+    }
+    if ([string]::IsNullOrWhiteSpace($fastModeUiTarget)) {
       Fail 'could not find Model Experience Fast Mode UI target'
     }
 
@@ -1654,6 +1732,19 @@ function Invoke-PatchAppAsar {
           $text.Contains('supportedReasoningEfforts')) {
         $customModelsTarget = $candidate
         break
+      }
+    }
+    if ([string]::IsNullOrWhiteSpace($customModelsTarget)) {
+      foreach ($candidate in (Get-ChildItem -LiteralPath $assetsDir -Filter 'app-initial-*.js' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)) {
+        $text = Get-Content -Raw -LiteralPath $candidate
+        if ($text.Contains('available_models') -and
+            $text.Contains('useHiddenModels') -and
+            $text.Contains('supportedReasoningEfforts') -and
+            (($text -match '\?\.has\(\w+\.model\)===!0\|\|\(\w+\?\w+\.has\(\w+\.model\):!\w+\.hidden\)') -or
+             $text.Contains('CODEX_CUSTOM_MODELS_V1'))) {
+          $customModelsTarget = $candidate
+          break
+        }
       }
     }
     if ([string]::IsNullOrWhiteSpace($customModelsTarget)) {

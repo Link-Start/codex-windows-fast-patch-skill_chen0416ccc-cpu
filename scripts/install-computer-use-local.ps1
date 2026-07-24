@@ -1532,7 +1532,7 @@ try {
     method = "list_windows";
     result = await transport.request(method, {});
   } catch (error) {
-    if (!String(error?.message ?? error).includes("unsupported method")) {
+    if (!/unsupported.*method/i.test(String(error?.message ?? error))) {
       throw error;
     }
     method = "screenInfo";
