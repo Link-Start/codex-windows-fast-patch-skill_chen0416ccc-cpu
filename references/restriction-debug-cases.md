@@ -137,16 +137,18 @@ Checks:
 
 - Run `codex plugin list` before package operations. If `sites@openai-bundled`, `chrome@openai-bundled`, `browser@openai-bundled`, or `computer-use@openai-bundled` are missing, disabled, or blocked by a marketplace snapshot error, treat that as local bundled marketplace evidence first.
 - Run `scripts\install-computer-use-local.ps1 -StrictVerifyOnly` before package operations. A failure on a stale Chrome native messaging manifest, missing `latest` link, missing helper path, missing plugin file, or `@oai/sky` import/runtime path is local repair evidence.
-- Inspect `%USERPROFILE%\.codex\.tmp\bundled-marketplaces\openai-bundled\.agents\plugins\marketplace.json`; in current Windows builds it should retain `sites`, `browser`, `chrome`, `computer-use`, and `latex`.
-- Inspect `%USERPROFILE%\.codex\.tmp\bundled-marketplaces\openai-bundled\plugins\computer-use`.
+- Read `[marketplaces.openai-bundled].source` from `config.toml`, then inspect `.agents\plugins\marketplace.json` under that stable root; in current Windows builds it should retain `sites`, `browser`, `chrome`, `computer-use`, and `latex`.
+- Inspect `plugins\computer-use` under the configured stable marketplace. Do not use the Desktop-owned `.tmp\bundled-marketplaces` copy as the final configured source.
 - Inspect running `extension-host` processes whose paths are under `%USERPROFILE%\.codex\plugins\cache\openai-bundled`.
 - Inspect `%USERPROFILE%\.codex\chrome-native-hosts.json`; remove stale entries whose `extensionHostPath` or `browserClientPath` points to a missing file.
+- If the browser files and versioned cache exist but `codex plugin list` still reports `browser@openai-bundled` as `not installed`, do not treat another direct TOML write as a durable install. Desktop reconciliation can prune that enabled entry again because the CLI install record was never created.
 
 Action:
 
 - Do not start with the full MSIX repack for this symptom class. The full repack removes and reinstalls the `OpenAI.Codex` package and can make the running Desktop app disappear; use it only after evidence shows a Desktop ASAR/UI gate is still closed.
 - Stop only those bundled `extension-host` processes when they are locking the bundled marketplace mirror.
 - Rerun `scripts\install-computer-use-local.ps1`.
+- Let the repair register `browser@openai-bundled` through `codex plugin add ... --json` after the local marketplace is complete. On Windows, invoke a user-accessible CLI shim such as the npm `codex.cmd`; do not execute the protected `WindowsApps\...\resources\codex.exe` path directly.
 - If the copy fails because a file under `.tmp\bundled-marketplaces\openai-bundled` disappears mid-read, treat it as Desktop reconciliation racing the repair. Stable plugin caches must be sourced from the installed package; only the locally modified Computer Use runtime is overlaid afterward.
 - Restart Codex Desktop.
 - Confirm the latest Desktop log ends with `computer-use native pipe startup ready`.
@@ -178,7 +180,7 @@ Get-ChildItem -LiteralPath $root -Recurse -File |
 ```
 
 - Inspect the extracted main bundle or live ASAR for `isAvailable:({features:e})=>e.sites` near the bundled plugin descriptors. That shape means package resources can contain `sites`, but runtime filtering can still remove it when `features.sites` is false.
-- Confirm that the local mirror under `%USERPROFILE%\.codex\.tmp\bundled-marketplaces\openai-bundled` has five plugin directories after repair: `sites`, `browser`, `chrome`, `computer-use`, and `latex`.
+- Confirm that the stable root configured under `[marketplaces.openai-bundled]` has at least the five required plugin directories after repair: `sites`, `browser`, `chrome`, `computer-use`, and `latex`.
 
 Action:
 

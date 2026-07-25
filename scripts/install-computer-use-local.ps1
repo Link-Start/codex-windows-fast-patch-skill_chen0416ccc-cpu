@@ -846,8 +846,46 @@ function Update-BundledMarketplaceManifest {
   }
 
   $plugins = @($json.plugins | Where-Object { $_.name -ne 'computer-use' })
+  $pluginNames = @{}
+  foreach ($plugin in $plugins) {
+    $pluginNames[[string]$plugin.name] = $true
+  }
+
+  $sourceRoot = Get-InstalledBundledMarketplaceRoot
+  $sourceManifestPath = Join-Path $sourceRoot '.agents\plugins\marketplace.json'
+  $sourceManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $sourceManifestPath | ConvertFrom-Json
+  foreach ($sourcePlugin in @($sourceManifest.plugins)) {
+    $name = [string]$sourcePlugin.name
+    if ($name -ne 'computer-use' -and -not $pluginNames.ContainsKey($name)) {
+      $plugins += $sourcePlugin
+      $pluginNames[$name] = $true
+      Write-Log "restored bundled marketplace entry from installed package: $name"
+    }
+  }
+
   $json.plugins = @($entry) + $plugins
   ConvertTo-JsonFile $manifestPath $json
+}
+
+function Get-StableBundledMarketplaceRoot {
+  param([string]$CodexHomeResolved)
+
+  $tmpRoot = Join-Path $CodexHomeResolved '.tmp'
+  if (Test-Path -LiteralPath $tmpRoot -PathType Container) {
+    $tmpItem = Get-Item -LiteralPath $tmpRoot -Force
+    if (($tmpItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+      $target = [string](@($tmpItem.Target) | Select-Object -First 1)
+      if (-not [string]::IsNullOrWhiteSpace($target)) {
+        if (-not [System.IO.Path]::IsPathRooted($target)) {
+          $target = Join-Path (Split-Path -Parent $tmpRoot) $target
+        }
+        $target = [System.IO.Path]::GetFullPath($target)
+        return Join-Path (Split-Path -Parent $target) 'openai-bundled-marketplace'
+      }
+    }
+  }
+
+  return Join-Path $CodexHomeResolved 'marketplaces\openai-bundled-local'
 }
 
 function Get-ComputerUsePipeConfigState {
@@ -1124,7 +1162,50 @@ function Test-BundledMarketplacePluginAvailable {
   )
 
   $pluginJson = Join-Path $MarketplaceRoot "plugins\$PluginName\.codex-plugin\plugin.json"
-  return Test-Path -LiteralPath $pluginJson -PathType Leaf
+  if (-not (Test-Path -LiteralPath $pluginJson -PathType Leaf)) {
+    return $false
+  }
+
+  $manifestPath = Join-Path $MarketplaceRoot '.agents\plugins\marketplace.json'
+  if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    return $false
+  }
+  try {
+    $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
+    return @($manifest.plugins | Where-Object { [string]$_.name -eq $PluginName }).Count -gt 0
+  } catch {
+    return $false
+  }
+}
+
+function Install-BundledMarketplacePluginWithCodexCli {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$PluginName
+  )
+
+  $candidates = @(Get-Command codex -All -ErrorAction SilentlyContinue | Where-Object {
+    $_.Source -and $_.Source -notmatch '(?i)\\WindowsApps\\'
+  })
+  $codex = $candidates | Where-Object { $_.Source.EndsWith('.cmd', [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+  if (-not $codex) {
+    $codex = $candidates | Where-Object { $_.Source.EndsWith('.ps1', [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+  }
+  if (-not $codex) {
+    $codex = $candidates | Where-Object { $_.Source.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+  }
+  if (-not $codex) {
+    throw "Codex CLI not found; cannot register $PluginName@openai-bundled"
+  }
+
+  $selector = "$PluginName@openai-bundled"
+  $output = @(& $codex.Source plugin add $selector --json 2>&1)
+  if ($LASTEXITCODE -ne 0) {
+    $detail = ($output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
+    throw "Codex CLI failed to register ${selector}: $detail"
+  }
+
+  Write-Log "registered bundled plugin with Codex CLI: $selector"
 }
 
 function Sync-OpenAiBundledPluginCache {
@@ -1694,7 +1775,7 @@ function Test-OfficialComputerUseCache {
 
 function Install-ComputerUse {
   $codexHomeResolved = Resolve-OrCreateDirectory $CodexHome
-  $marketplaceRoot = Join-Path $codexHomeResolved '.tmp\bundled-marketplaces\openai-bundled'
+  $marketplaceRoot = Get-StableBundledMarketplaceRoot $codexHomeResolved
   $pluginSourceRoot = Join-Path $marketplaceRoot 'plugins\computer-use'
   $cacheRoot = Join-Path $codexHomeResolved 'plugins\cache\openai-bundled\computer-use'
   $latestPath = Join-Path $cacheRoot 'latest'
@@ -1725,6 +1806,17 @@ function Install-ComputerUse {
 
   Update-ChromeNativeMessagingManifest $chromeCacheRoot
 
+  # Desktop can reconcile the mutable mirror while caches are being copied.
+  # Re-merge shipped descriptors immediately before final verification.
+  Update-BundledMarketplaceManifest $marketplaceRoot
+  Update-CodexConfig $marketplaceRoot
+
+  # A cache plus a hand-written enabled entry is not an installed plugin to the
+  # current CLI. Register browser through the supported command so Desktop does
+  # not prune its config entry during marketplace reconciliation.
+  Install-BundledMarketplacePluginWithCodexCli 'browser'
+  Update-CodexConfig $marketplaceRoot
+
   Write-Log "installed marketplace plugin: $pluginSourceRoot"
   Write-Log "installed cached plugin: $computerUseCacheRoot"
   Write-Log "updated latest junction: $latestPath"
@@ -1754,7 +1846,7 @@ function Test-ComputerUse {
     return
   }
 
-  $marketplaceRoot = Join-Path $codexHomeResolved '.tmp\bundled-marketplaces\openai-bundled'
+  $marketplaceRoot = Get-StableBundledMarketplaceRoot $codexHomeResolved
   $manifestPath = Join-Path $marketplaceRoot '.agents\plugins\marketplace.json'
   $cacheLatest = Join-Path $codexHomeResolved 'plugins\cache\openai-bundled\computer-use\latest'
   $browserPluginRoot = Join-Path $marketplaceRoot 'plugins\browser'
