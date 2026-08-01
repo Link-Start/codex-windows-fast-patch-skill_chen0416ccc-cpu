@@ -1194,12 +1194,24 @@ function Install-BundledMarketplacePluginWithCodexCli {
   if (-not $codex) {
     $codex = $candidates | Where-Object { $_.Source.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
   }
-  if (-not $codex) {
+  $codexPath = if ($codex) { [string]$codex.Source } else { '' }
+  if ([string]::IsNullOrWhiteSpace($codexPath)) {
+    $localBinRoot = Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin'
+    if (Test-Path -LiteralPath $localBinRoot -PathType Container) {
+      $codexPath = [string](Get-ChildItem -LiteralPath $localBinRoot -Recurse -Filter 'codex.exe' -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1 -ExpandProperty FullName)
+      if (-not [string]::IsNullOrWhiteSpace($codexPath)) {
+        Write-Log "using user-local Codex CLI: $codexPath"
+      }
+    }
+  }
+  if ([string]::IsNullOrWhiteSpace($codexPath)) {
     throw "Codex CLI not found; cannot register $PluginName@openai-bundled"
   }
 
   $selector = "$PluginName@openai-bundled"
-  $output = @(& $codex.Source plugin add $selector --json 2>&1)
+  $output = @(& $codexPath plugin add $selector --json 2>&1)
   if ($LASTEXITCODE -ne 0) {
     $detail = ($output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
     throw "Codex CLI failed to register ${selector}: $detail"
