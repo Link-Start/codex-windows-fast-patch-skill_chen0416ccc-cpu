@@ -648,9 +648,14 @@ const visibilityPatterns = [
     re: /if\(([$A-Za-z_][$\w]*)\?\.has\(([$A-Za-z_][$\w]*)\.model\)===!0\|\|\(([$A-Za-z_][$\w]*)\?([$A-Za-z_][$\w]*)\.has\(\2\.model\):!\2\.hidden\)\)\{/,
     modelGroup: 2,
   },
+  {
+    re: /return ([$A-Za-z_][$\w]*)\?\.has\(([$A-Za-z_][$\w]*)\.model\)===!0\|\|\(([$A-Za-z_][$\w]*)(?:&&[$A-Za-z_][$\w]*!==`amazonBedrock`)?\?([$A-Za-z_][$\w]*)\.has\(\2\.model\):!\2\.hidden\)\}/,
+    modelGroup: 2,
+    isReturn: true,
+  },
 ];
 const target = visibilityPatterns
-  .map(({ re, modelGroup }) => ({ match: text.match(re), modelGroup }))
+  .map(({ re, modelGroup, isReturn }) => ({ match: text.match(re), modelGroup, isReturn }))
   .find(({ match }) => match != null);
 const match = target?.match;
 if (!match) {
@@ -660,8 +665,14 @@ if (!match) {
 
 const forced = JSON.stringify(models);
 const modelVar = match[target.modelGroup];
-const originalCondition = match[0].slice(3, -2);
-const replacement = `if(/*${marker}*/${forced}.includes(${modelVar}.model)||(${originalCondition})){`;
+let replacement;
+if (target.isReturn) {
+  const originalCondition = match[0].slice('return '.length, -1);
+  replacement = `return/*${marker}*/${forced}.includes(${modelVar}.model)||(${originalCondition})}`;
+} else {
+  const originalCondition = match[0].slice(3, -2);
+  replacement = `if(/*${marker}*/${forced}.includes(${modelVar}.model)||(${originalCondition})){`;
+}
 const next = text.replace(match[0], replacement);
 if (!next.includes(marker) || !models.every((model) => next.includes(model))) {
   process.stderr.write('custom-model-patch-verification-failed\n');
@@ -1180,15 +1191,15 @@ function patchSidebarAvailability(file) {
 function patchDesktopFeatureSender(file) {
   const before = read(file);
   const patchedSenderFragment = 'inAppBrowserUse:!0,inAppBrowserUseAllowed:!0,browserPane:!0,externalBrowserUse:!0,externalBrowserUseAllowed:!0,computerUse:';
-  const patchedSenderPattern = /inAppBrowserUse:!0,inAppBrowserUseAllowed:!0,(defaultLinkOpenTargetPreference:[^,}]+,)?(linksDefaultInAppBrowser:[^,}]+,)?(localBackend:[^,}]+,)?browserPane:!0,externalBrowserUse:!0,externalBrowserUseAllowed:!0,(findShortcuts:[^,}]+,)?computerUse:/;
+  const patchedSenderPattern = /inAppBrowserUse:!0,inAppBrowserUseAllowed:!0,((?:[A-Za-z_$][\w$]*:[^,}]+,){0,10}?)browserPane:!0,externalBrowserUse:!0,externalBrowserUseAllowed:!0,((?:[A-Za-z_$][\w$]*:[^,}]+,){0,6}?)computerUse:/;
   if (!before.includes('browser_use_availability_resolved') || !before.includes('electron-desktop-features-changed')) {
     process.stderr.write('browser-use-desktop-feature-sender-target-not-found\n');
     process.exit(2);
   }
 
   let after = before.replace(
-    /inAppBrowserUse:[^,}]+,inAppBrowserUseAllowed:[^,}]+,(defaultLinkOpenTargetPreference:[^,}]+,)?(linksDefaultInAppBrowser:[^,}]+,)?(localBackend:[^,}]+,)?browserPane:[^,}]+,externalBrowserUse:[^,}]+,externalBrowserUseAllowed:[^,}]+,(findShortcuts:[^,}]+,)?computerUse:/,
-    'inAppBrowserUse:!0,inAppBrowserUseAllowed:!0,$1$2$3browserPane:!0,externalBrowserUse:!0,externalBrowserUseAllowed:!0,$4computerUse:'
+    /inAppBrowserUse:[^,}]+,inAppBrowserUseAllowed:[^,}]+,((?:[A-Za-z_$][\w$]*:[^,}]+,){0,10}?)browserPane:[^,}]+,externalBrowserUse:[^,}]+,externalBrowserUseAllowed:[^,}]+,((?:[A-Za-z_$][\w$]*:[^,}]+,){0,6}?)computerUse:/,
+    'inAppBrowserUse:!0,inAppBrowserUseAllowed:!0,$1browserPane:!0,externalBrowserUse:!0,externalBrowserUseAllowed:!0,$2computerUse:'
   );
   after = after.replace(
     /browser_use_availability_resolved`,\{safe:\{available:[^,]+,platform:([^,]+),reason:[^,]+,release:([^}]+)\},sensitive:\{browserPane:[^}]+\}\}\)/,
@@ -1391,7 +1402,7 @@ function Find-PatchTargets {
       if ($text.Contains('available_models') -and
           $text.Contains('useHiddenModels') -and
           $text.Contains('supportedReasoningEfforts') -and
-          (($text -match '\?\.has\(\w+\.model\)===!0\|\|\(\w+\?\w+\.has\(\w+\.model\):!\w+\.hidden\)') -or
+          (($text -match '\?\.has\(\w+\.model\)===!0\|\|\(\w+(?:&&\w+!==`amazonBedrock`)?\?\w+\.has\(\w+\.model\):!\w+\.hidden\)') -or
            $text.Contains('CODEX_CUSTOM_MODELS_V1'))) {
         $customModelsTarget = $candidate
         break
@@ -1475,8 +1486,8 @@ function Find-PatchTargets {
   foreach ($candidate in $desktopFeatureSenderCandidates) {
     $text = Get-Content -Raw -LiteralPath $candidate
     if ($text.Contains('electron-desktop-features-changed') -and
-        (($text -match 'inAppBrowserUse:[^,}]+,inAppBrowserUseAllowed:[^,}]+,(defaultLinkOpenTargetPreference:[^,}]+,)?(linksDefaultInAppBrowser:[^,}]+,)?(localBackend:[^,}]+,)?browserPane:[^,}]+,externalBrowserUse:[^,}]+,externalBrowserUseAllowed:[^,}]+,(findShortcuts:[^,}]+,)?computerUse:[^,}]+') -or
-         ($text -match 'inAppBrowserUse:!0,inAppBrowserUseAllowed:!0,(defaultLinkOpenTargetPreference:[^,}]+,)?(linksDefaultInAppBrowser:[^,}]+,)?(localBackend:[^,}]+,)?browserPane:!0,externalBrowserUse:!0,externalBrowserUseAllowed:!0'))) {
+        (($text -match 'inAppBrowserUse:[^,}]+,inAppBrowserUseAllowed:[^,}]+,(?:[A-Za-z_$][\w$]*:[^,}]+,)*?browserPane:[^,}]+,externalBrowserUse:[^,}]+,externalBrowserUseAllowed:[^,}]+,(?:[A-Za-z_$][\w$]*:[^,}]+,)*?computerUse:[^,}]+') -or
+         ($text -match 'inAppBrowserUse:!0,inAppBrowserUseAllowed:!0,(?:[A-Za-z_$][\w$]*:[^,}]+,)*?browserPane:!0,externalBrowserUse:!0,externalBrowserUseAllowed:!0'))) {
       $desktopFeatureSenderTarget = $candidate
       break
     }
@@ -1832,7 +1843,7 @@ function Invoke-PatchAppAsar {
         if ($text.Contains('available_models') -and
             $text.Contains('useHiddenModels') -and
             $text.Contains('supportedReasoningEfforts') -and
-            (($text -match '\?\.has\(\w+\.model\)===!0\|\|\(\w+\?\w+\.has\(\w+\.model\):!\w+\.hidden\)') -or
+            (($text -match '\?\.has\(\w+\.model\)===!0\|\|\(\w+(?:&&\w+!==`amazonBedrock`)?\?\w+\.has\(\w+\.model\):!\w+\.hidden\)') -or
              $text.Contains('CODEX_CUSTOM_MODELS_V1'))) {
           $customModelsTarget = $candidate
           break
