@@ -9,6 +9,7 @@ param(
   [switch]$KeepBuild,
   [switch]$SkipMarketplace,
   [switch]$SkipComputerUse,
+  [switch]$InstallAllBundledPlugins,
   [switch]$RegisterMarketplaceOnly,
   [switch]$ForceRebuild,
   [string]$OutputRoot,
@@ -259,7 +260,8 @@ function Repair-KnownLocalMarketplaceLayouts {
 function Invoke-ComputerUseInstaller {
   param(
     [string]$Stage,
-    [switch]$VerifyOnly
+    [switch]$VerifyOnly,
+    [switch]$InstallAllBundledPlugins
   )
 
   if (-not (Test-Path -LiteralPath $ComputerUseScript)) {
@@ -271,6 +273,9 @@ function Invoke-ComputerUseInstaller {
   if ($VerifyOnly) {
     $args += '-VerifyOnly'
     $mode = 'verify/repair'
+  }
+  if ($InstallAllBundledPlugins) {
+    $args += '-InstallAllBundledPlugins'
   }
 
   Write-Log "Computer Use ${mode}: $Stage"
@@ -415,7 +420,7 @@ if (-not $SkipComputerUse) {
   if ($DryRun) {
     Invoke-ComputerUseInstaller -Stage 'preflight before MSIX dry run' -VerifyOnly
   } else {
-    Invoke-ComputerUseInstaller -Stage 'preflight before MSIX patch'
+    Invoke-ComputerUseInstaller -Stage 'preflight before MSIX patch' -InstallAllBundledPlugins:$InstallAllBundledPlugins
   }
 }
 
@@ -499,8 +504,8 @@ for ($patchAttempt = 1; $patchAttempt -le $maxPatchAttempts; $patchAttempt++) {
     if ($DryRun) {
       Invoke-ComputerUseInstaller -Stage 'post-dry-run final verification' -VerifyOnly
     } else {
-      Invoke-ComputerUseInstaller -Stage 'post-patch refresh after Codex startup'
-      Invoke-ComputerUseInstaller -Stage 'post-patch final verification' -VerifyOnly
+      Invoke-ComputerUseInstaller -Stage 'post-patch refresh after Codex startup' -InstallAllBundledPlugins:$InstallAllBundledPlugins
+      Invoke-ComputerUseInstaller -Stage 'post-patch final verification' -VerifyOnly -InstallAllBundledPlugins:$InstallAllBundledPlugins
     }
   }
 

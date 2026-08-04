@@ -4,6 +4,7 @@ param(
   [string]$PluginVersion = '0.1.0-local',
   [switch]$VerifyOnly,
   [switch]$StrictVerifyOnly,
+  [switch]$InstallAllBundledPlugins,
   [switch]$SkipUserEnvironment
 )
 
@@ -1178,11 +1179,28 @@ function Test-BundledMarketplacePluginAvailable {
   }
 }
 
-function Install-BundledMarketplacePluginWithCodexCli {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$PluginName
+function Get-BundledMarketplacePluginNames {
+  param([string]$MarketplaceRoot)
+
+  $manifestPath = Join-Path $MarketplaceRoot '.agents\plugins\marketplace.json'
+  if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw "missing bundled marketplace manifest: $manifestPath"
+  }
+
+  $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
+  return @(
+    $manifest.plugins |
+      ForEach-Object { [string]$_.name } |
+      Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_) -and
+        (Test-BundledMarketplacePluginAvailable $MarketplaceRoot $_)
+      } |
+      Sort-Object -Unique
   )
+}
+
+function Get-UsableCodexCliPath {
+  param([string]$FailureContext)
 
   $candidates = @(Get-Command codex -All -ErrorAction SilentlyContinue | Where-Object {
     $_.Source -and $_.Source -notmatch '(?i)\\WindowsApps\\'
@@ -1207,10 +1225,19 @@ function Install-BundledMarketplacePluginWithCodexCli {
     }
   }
   if ([string]::IsNullOrWhiteSpace($codexPath)) {
-    throw "Codex CLI not found; cannot register $PluginName@openai-bundled"
+    throw "Codex CLI not found; cannot $FailureContext"
   }
+  return $codexPath
+}
+
+function Install-BundledMarketplacePluginWithCodexCli {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$PluginName
+  )
 
   $selector = "$PluginName@openai-bundled"
+  $codexPath = Get-UsableCodexCliPath "register $selector"
   $output = @(& $codexPath plugin add $selector --json 2>&1)
   if ($LASTEXITCODE -ne 0) {
     $detail = ($output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
@@ -1218,6 +1245,39 @@ function Install-BundledMarketplacePluginWithCodexCli {
   }
 
   Write-Log "registered bundled plugin with Codex CLI: $selector"
+}
+
+function Test-AllBundledMarketplacePluginsWithCodexCli {
+  param([string]$MarketplaceRoot)
+
+  $pluginNames = @(Get-BundledMarketplacePluginNames $MarketplaceRoot)
+  if ($pluginNames.Count -eq 0) {
+    throw "bundled marketplace has no complete plugin descriptors: $MarketplaceRoot"
+  }
+
+  $codexPath = Get-UsableCodexCliPath 'verify bundled plugin registration'
+  $output = @(& $codexPath plugin list --marketplace openai-bundled --json 2>&1)
+  if ($LASTEXITCODE -ne 0) {
+    $detail = ($output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
+    throw "Codex CLI failed to list bundled plugins: $detail"
+  }
+
+  $json = ($output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
+  try {
+    $pluginList = $json | ConvertFrom-Json -ErrorAction Stop
+  } catch {
+    throw "Codex CLI returned invalid bundled plugin JSON: $json"
+  }
+  foreach ($pluginName in $pluginNames) {
+    $selector = "$pluginName@openai-bundled"
+    $installedPlugin = @($pluginList.installed | Where-Object {
+      [string]$_.pluginId -eq $selector
+    } | Select-Object -First 1)
+    if ($installedPlugin.Count -eq 0 -or -not $installedPlugin[0].installed -or -not $installedPlugin[0].enabled) {
+      throw "bundled plugin is not installed and enabled: $selector"
+    }
+  }
+  Write-Log "all bundled marketplace plugins installed and enabled: $($pluginNames -join ',')"
 }
 
 function Sync-OpenAiBundledPluginCache {
@@ -1824,9 +1884,15 @@ function Install-ComputerUse {
   Update-CodexConfig $marketplaceRoot
 
   # A cache plus a hand-written enabled entry is not an installed plugin to the
-  # current CLI. Register browser through the supported command so Desktop does
-  # not prune its config entry during marketplace reconciliation.
-  Install-BundledMarketplacePluginWithCodexCli 'browser'
+  # current CLI. Full repairs can opt into every complete shipped descriptor;
+  # targeted Computer Use repairs keep the narrower browser-only behavior.
+  $pluginNamesToRegister = @('browser')
+  if ($InstallAllBundledPlugins) {
+    $pluginNamesToRegister = @(Get-BundledMarketplacePluginNames $marketplaceRoot)
+  }
+  foreach ($pluginName in $pluginNamesToRegister) {
+    Install-BundledMarketplacePluginWithCodexCli $pluginName
+  }
   Update-CodexConfig $marketplaceRoot
 
   Write-Log "installed marketplace plugin: $pluginSourceRoot"
@@ -1837,6 +1903,10 @@ function Install-ComputerUse {
 function Test-ComputerUse {
   $codexHomeResolved = Resolve-ExistingDirectory $CodexHome
   $installedMarketplaceRoot = Get-InstalledBundledMarketplaceRoot
+  if ($InstallAllBundledPlugins) {
+    $stableMarketplaceRoot = Get-StableBundledMarketplaceRoot $codexHomeResolved
+    Test-AllBundledMarketplacePluginsWithCodexCli $stableMarketplaceRoot
+  }
   $officialCacheLatest = Join-Path $codexHomeResolved 'plugins\cache\openai-bundled\computer-use\latest'
   $legacyLatestMarkers = @(
     (Join-Path $officialCacheLatest '.codex-plugin\plugin.json'),

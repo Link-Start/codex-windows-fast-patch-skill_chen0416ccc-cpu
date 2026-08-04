@@ -132,7 +132,7 @@ Expected verification after a full run:
 
 - The patch log includes `fast-mode UI patch result`, `locale i18n patch result`, and `browser-use gate patch result`, each as `patched` or `already-patched`.
 - Fast Mode local wire verification captures `service_tier=priority` from the `/v1/responses` HTTP body or WebSocket frame. If `codex exec` sends no request, the verifier falls back to app-server and also requires `thread/start serviceTier=priority`.
-- `codex plugin list` shows `sites`, `browser`, `chrome`, `computer-use`, and `latex` from `openai-bundled` as `installed, enabled` when bundled plugins are part of the repair.
+- `codex plugin list` shows `sites`, `browser`, `chrome`, `computer-use`, and `latex` from `openai-bundled` as `installed, enabled` when bundled plugins are part of the repair. When the user asks to restore every bundled feature, add `-InstallAllBundledPlugins` to the main wrapper; it registers and verifies every complete descriptor in the current stable marketplace, including version-dependent additions such as `deep-research` and `visualize`, instead of relying on a fixed list.
 - Desktop logs show the bundled marketplace retaining `pluginNames=["sites","browser","chrome","computer-use","latex"]` and no new `not_in_bundled_marketplace_plugin_names` entry for `sites`.
 - Desktop logs show `browser_use_availability_resolved` with `available=true` and `reason=local-patched` when browser use is part of the repair.
 - If the Windows 10 screenshot helper is in scope, the patcher reports the validated patched SHA-256, and real Explorer first/repeated captures, dynamic Task Manager frames, accessibility text, window enumeration, and post-warm-up resource stability all pass.

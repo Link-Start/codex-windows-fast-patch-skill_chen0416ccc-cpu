@@ -141,7 +141,7 @@ Copy-Item -Recurse -Force -LiteralPath (Join-Path $source 'assets') -Destination
 
 - 补丁日志包含 `fast-mode UI patch result`、`locale i18n patch result` 和 `browser-use gate patch result`，结果为 `patched` 或 `already-patched`。
 - Fast Mode 本地线缆验证能在 `/v1/responses` 的 HTTP 请求体或 WebSocket 帧里捕获 `service_tier=priority`；如果 `codex exec` 未发出请求，验证器会回退到 app-server，并额外确认 `thread/start serviceTier=priority`。
-- 如果本次修复包含 bundled 插件，`codex plugin list` 应显示 `openai-bundled` 下的 `sites`、`browser`、`chrome`、`computer-use`、`latex` 都为 `installed, enabled`。
+- 如果本次修复包含 bundled 插件，`codex plugin list` 应显示 `openai-bundled` 下的 `sites`、`browser`、`chrome`、`computer-use`、`latex` 都为 `installed, enabled`。用户要求恢复全部 bundled 功能时，给主 wrapper 加 `-InstallAllBundledPlugins`；它会按当前稳定 marketplace 的实际完整描述符注册并验证所有插件，包括随版本新增的 `deep-research`、`visualize`，而不是依赖固定列表。
 - Desktop 日志应显示 bundled marketplace 保留 `pluginNames=["sites","browser","chrome","computer-use","latex"]`，且不再出现新的 `not_in_bundled_marketplace_plugin_names` / `sites`。
 - 如果本次修复包含浏览器能力，Desktop 日志里 `browser_use_availability_resolved` 显示 `available=true` 和 `reason=local-patched`。
 - 如果修复 Win10 截图 helper，patcher 应报告已验证 patched SHA-256；Explorer 首帧/连续帧、任务管理器动态帧、文字读取、窗口枚举和预热后资源稳定性都应通过。
