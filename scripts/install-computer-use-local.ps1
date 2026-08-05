@@ -4,7 +4,7 @@ param(
   [string]$PluginVersion = '0.1.0-local',
   [switch]$VerifyOnly,
   [switch]$StrictVerifyOnly,
-  [switch]$InstallAllBundledPlugins,
+  [switch]$VerifyAllBundledPluginsAvailable,
   [switch]$SkipUserEnvironment
 )
 
@@ -790,7 +790,8 @@ function Write-PluginTree {
     Write-Utf8NoBom $skillPath ((Get-SkillMarkdown) + "`n")
   }
   if (-not (Test-Path -LiteralPath $clientPath -PathType Leaf)) {
-    throw "installed Computer Use client script is missing: $clientPath"
+    Write-Log "descriptor-only Computer Use plugin uses the independent cua_node runtime: $Root"
+    return
   }
   Patch-ComputerUseClientScript $clientPath
 
@@ -934,11 +935,6 @@ function Update-CodexConfig {
   }
   Set-TomlTable $configPath '[plugins."chrome@openai-bundled"]' @{
     enabled = $true
-  }
-  if (Test-BundledMarketplacePluginAvailable $MarketplaceRoot 'sites') {
-    Set-TomlTable $configPath '[plugins."sites@openai-bundled"]' @{
-      enabled = $true
-    }
   }
   Set-TomlTable $configPath '[windows]' @{
     sandbox = 'unelevated'
@@ -1188,15 +1184,24 @@ function Get-BundledMarketplacePluginNames {
   }
 
   $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
-  return @(
+  $pluginNames = @(
     $manifest.plugins |
       ForEach-Object { [string]$_.name } |
-      Where-Object {
-        -not [string]::IsNullOrWhiteSpace($_) -and
-        (Test-BundledMarketplacePluginAvailable $MarketplaceRoot $_)
-      } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
       Sort-Object -Unique
   )
+  if ($pluginNames.Count -eq 0) {
+    throw "bundled marketplace has no plugin descriptors: $MarketplaceRoot"
+  }
+
+  $incomplete = @($pluginNames | Where-Object {
+    -not (Test-BundledMarketplacePluginAvailable $MarketplaceRoot $_)
+  })
+  if ($incomplete.Count -gt 0) {
+    throw "bundled marketplace has incomplete plugin descriptors: $($incomplete -join ',')"
+  }
+
+  return $pluginNames
 }
 
 function Get-UsableCodexCliPath {
@@ -1247,16 +1252,15 @@ function Install-BundledMarketplacePluginWithCodexCli {
   Write-Log "registered bundled plugin with Codex CLI: $selector"
 }
 
-function Test-AllBundledMarketplacePluginsWithCodexCli {
-  param([string]$MarketplaceRoot)
+function Get-BundledMarketplacePluginListWithCodexCli {
+  param([switch]$IncludeAvailable)
 
-  $pluginNames = @(Get-BundledMarketplacePluginNames $MarketplaceRoot)
-  if ($pluginNames.Count -eq 0) {
-    throw "bundled marketplace has no complete plugin descriptors: $MarketplaceRoot"
+  $codexPath = Get-UsableCodexCliPath 'inspect bundled plugin availability'
+  $args = @('plugin', 'list', '--marketplace', 'openai-bundled', '--json')
+  if ($IncludeAvailable) {
+    $args = @('plugin', 'list', '--marketplace', 'openai-bundled', '--available', '--json')
   }
-
-  $codexPath = Get-UsableCodexCliPath 'verify bundled plugin registration'
-  $output = @(& $codexPath plugin list --marketplace openai-bundled --json 2>&1)
+  $output = @(& $codexPath @args 2>&1)
   if ($LASTEXITCODE -ne 0) {
     $detail = ($output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
     throw "Codex CLI failed to list bundled plugins: $detail"
@@ -1264,20 +1268,61 @@ function Test-AllBundledMarketplacePluginsWithCodexCli {
 
   $json = ($output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
   try {
-    $pluginList = $json | ConvertFrom-Json -ErrorAction Stop
+    return $json | ConvertFrom-Json -ErrorAction Stop
   } catch {
     throw "Codex CLI returned invalid bundled plugin JSON: $json"
   }
+}
+
+function Test-BundledMarketplacePluginInstalledWithCodexCli {
+  param([string]$PluginName)
+
+  $pluginList = Get-BundledMarketplacePluginListWithCodexCli
+  $selector = "$PluginName@openai-bundled"
+  return @($pluginList.installed | Where-Object {
+    [string]$_.pluginId -eq $selector -and [bool]$_.installed
+  }).Count -gt 0
+}
+
+function Test-AllBundledMarketplacePluginsAvailableWithCodexCli {
+  param(
+    [string]$MarketplaceRoot,
+    [string]$InstalledMarketplaceRoot
+  )
+
+  if ([string]::IsNullOrWhiteSpace($InstalledMarketplaceRoot)) {
+    $InstalledMarketplaceRoot = Get-InstalledBundledMarketplaceRoot
+  }
+  $pluginNames = @(Get-BundledMarketplacePluginNames $InstalledMarketplaceRoot)
+  $stablePluginNames = @(Get-BundledMarketplacePluginNames $MarketplaceRoot)
+  $descriptorDrift = @(Compare-Object -ReferenceObject $pluginNames -DifferenceObject $stablePluginNames)
+  if ($descriptorDrift.Count -gt 0) {
+    $detail = @($descriptorDrift | ForEach-Object { "$($_.InputObject):$($_.SideIndicator)" }) -join ','
+    throw "stable bundled marketplace descriptor set does not match the installed package: $detail"
+  }
+
+  $pluginList = Get-BundledMarketplacePluginListWithCodexCli -IncludeAvailable
+  $entries = @($pluginList.installed) + @($pluginList.available)
   foreach ($pluginName in $pluginNames) {
     $selector = "$pluginName@openai-bundled"
-    $installedPlugin = @($pluginList.installed | Where-Object {
+    $availablePlugin = @($entries | Where-Object {
       [string]$_.pluginId -eq $selector
     } | Select-Object -First 1)
-    if ($installedPlugin.Count -eq 0 -or -not $installedPlugin[0].installed -or -not $installedPlugin[0].enabled) {
-      throw "bundled plugin is not installed and enabled: $selector"
+    if ($availablePlugin.Count -eq 0) {
+      throw "bundled plugin is not discoverable as installed or available: $selector"
+    }
+
+    $sourcePath = [string]$availablePlugin[0].source.path
+    $descriptorPath = if ([string]::IsNullOrWhiteSpace($sourcePath)) {
+      $null
+    } else {
+      Join-Path $sourcePath '.codex-plugin\plugin.json'
+    }
+    if ([string]::IsNullOrWhiteSpace($descriptorPath) -or -not (Test-Path -LiteralPath $descriptorPath -PathType Leaf)) {
+      throw "bundled plugin has no installable local source: $selector"
     }
   }
-  Write-Log "all bundled marketplace plugins installed and enabled: $($pluginNames -join ',')"
+  Write-Log "all bundled marketplace plugins are available without changing install state: $($pluginNames -join ',')"
 }
 
 function Sync-OpenAiBundledPluginCache {
@@ -1389,6 +1434,10 @@ function Sync-BundledMarketplaceFromInstalledApp {
 function Test-BrowserClientProcessShimCompatible {
   param([string]$Content)
 
+  if ($Content.Contains('node:process')) {
+    return $false
+  }
+
   $localProxy = "  const process = processShim;`n  const global = Object.create(globalThis, { process: { value: processShim, enumerable: true } });"
   if ($Content.Contains($localProxy)) {
     return $true
@@ -1458,15 +1507,33 @@ function Patch-ChromeWindowsRegistryParsing {
   }
   $browserClientContent = [System.IO.File]::ReadAllText($browserClientPath, [System.Text.UTF8Encoding]::new($false))
   $browserClientNew = "  const process = processShim;`n  const global = Object.create(globalThis, { process: { value: processShim, enumerable: true } });"
-  if (-not (Test-BrowserClientProcessShimCompatible $browserClientContent)) {
+  $browserClientNext = $browserClientContent
+
+  $nodeProcessEnvPattern = 'import\{env as (?<name>[$A-Za-z_][$\w]*)\}from"node:process";'
+  $nodeProcessEnvMatch = [regex]::Match($browserClientNext, $nodeProcessEnvPattern)
+  if ($nodeProcessEnvMatch.Success) {
+    $envBinding = $nodeProcessEnvMatch.Groups['name'].Value
+    $browserClientNext = $browserClientNext.Remove($nodeProcessEnvMatch.Index, $nodeProcessEnvMatch.Length).Insert(
+      $nodeProcessEnvMatch.Index,
+      "const $envBinding=processShim.env;"
+    )
+  }
+
+  if (-not (Test-BrowserClientProcessShimCompatible $browserClientNext) -and -not $browserClientNext.Contains($browserClientNew)) {
     $browserClientOld = "  globalThis.process = processShim;`n  globalThis.global = globalThis.global ?? globalThis;`n  globalThis.global.process = processShim;"
     $browserClientIntermediate = "  const process = processShim;`n  const global = globalThis;"
     $browserClientIntermediate2 = "  const process = processShim;`n  const global = Object.assign(Object.create(globalThis), { process: processShim });"
-    $browserClientAnchor = if ($browserClientContent.Contains($browserClientOld)) { $browserClientOld } elseif ($browserClientContent.Contains($browserClientIntermediate)) { $browserClientIntermediate } elseif ($browserClientContent.Contains($browserClientIntermediate2)) { $browserClientIntermediate2 } else { $null }
+    $browserClientAnchor = if ($browserClientNext.Contains($browserClientOld)) { $browserClientOld } elseif ($browserClientNext.Contains($browserClientIntermediate)) { $browserClientIntermediate } elseif ($browserClientNext.Contains($browserClientIntermediate2)) { $browserClientIntermediate2 } else { $null }
     if ($null -eq $browserClientAnchor) {
       throw "Chrome browser client process shim anchor not found: $browserClientPath"
     }
-    Write-Utf8NoBom $browserClientPath ($browserClientContent.Replace($browserClientAnchor, $browserClientNew))
+    $browserClientNext = $browserClientNext.Replace($browserClientAnchor, $browserClientNew)
+  }
+  if (-not (Test-BrowserClientProcessShimCompatible $browserClientNext)) {
+    throw "Chrome browser client has an unsupported process dependency: $browserClientPath"
+  }
+  if ($browserClientNext -cne $browserClientContent) {
+    Write-Utf8NoBom $browserClientPath $browserClientNext
   }
 
   Write-Log 'patched Chrome registry parsing and browser runtime process shim compatibility'
@@ -1551,7 +1618,6 @@ function Test-CodexConfig {
 
   Test-TomlSyntax $ConfigPath
   $expectedSource = '\\?\' + $MarketplaceRoot
-  $sitesRequired = Test-BundledMarketplacePluginAvailable $MarketplaceRoot 'sites'
   $python = Get-Command python -ErrorAction SilentlyContinue | Select-Object -First 1
   if (-not $python) {
     $content = [System.IO.File]::ReadAllText($ConfigPath, [System.Text.UTF8Encoding]::new($false))
@@ -1566,9 +1632,6 @@ function Test-CodexConfig {
     }
     if ($content -notmatch '(?ms)^\[plugins\."chrome@openai-bundled"\]\s*\r?\n(?:(?!^\[).)*enabled\s*=\s*true') {
       throw 'config.toml is missing plugins."chrome@openai-bundled".enabled=true'
-    }
-    if ($sitesRequired -and $content -notmatch '(?ms)^\[plugins\."sites@openai-bundled"\]\s*\r?\n(?:(?!^\[).)*enabled\s*=\s*true') {
-      throw 'config.toml is missing plugins."sites@openai-bundled".enabled=true'
     }
     if ($content -notmatch '(?ms)^\[windows\]\s*\r?\n(?:(?!^\[).)*sandbox\s*=\s*[''"]unelevated[''"]') {
       throw 'config.toml is missing windows.sandbox=unelevated'
@@ -1588,7 +1651,6 @@ import tomllib
 
 config_path = pathlib.Path(sys.argv[1])
 expected_source = sys.argv[2]
-sites_required = sys.argv[3].lower() == "true"
 data = tomllib.loads(config_path.read_text(encoding="utf-8"))
 errors = []
 
@@ -1609,8 +1671,6 @@ elif plugin.get("enabled") is not True:
     errors.append('plugins."computer-use@openai-bundled".enabled must be true')
 
 required_plugin_ids = ["browser@openai-bundled", "chrome@openai-bundled"]
-if sites_required:
-    required_plugin_ids.append("sites@openai-bundled")
 
 for plugin_id in required_plugin_ids:
     plugin = plugins.get(plugin_id)
@@ -1645,7 +1705,7 @@ if errors:
   $temp = Join-Path $env:TEMP ('codex-config-validate-' + [guid]::NewGuid().ToString('N') + '.py')
   try {
     Write-Utf8NoBom $temp $script
-    & $python.Source $temp $ConfigPath $expectedSource ([string]$sitesRequired)
+    & $python.Source $temp $ConfigPath $expectedSource
     if ($LASTEXITCODE -ne 0) {
       throw "semantic config validation failed for $ConfigPath"
     }
@@ -1787,6 +1847,64 @@ console.log(JSON.stringify({ ok: true, exports: Object.keys(mod).sort() }));
   }
 }
 
+function Test-ComputerUseRuntimeImport {
+  param([string]$SkyRoot)
+
+  $node = Get-Command node.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $node) {
+    throw 'node.exe not found; cannot verify the independent Computer Use runtime import'
+  }
+
+  $entryPath = Join-Path $SkyRoot 'dist\project\cua\sky_js\src\index.js'
+  if (-not (Test-Path -LiteralPath $entryPath -PathType Leaf)) {
+    throw "independent Computer Use runtime entry is missing: $entryPath"
+  }
+
+  $script = @'
+globalThis.nodeRepl = {
+  config: {},
+  nativePipe: {},
+  env: {
+    NODE_REPL_NODE_MODULE_DIRS:
+      process.env.NODE_REPL_NODE_MODULE_DIRS ?? process.env.NODE_PATH ?? "",
+  },
+  notify: () => {},
+};
+const mod = await import(process.argv[2]);
+if (typeof mod.sky !== "object" || mod.sky === null) {
+  throw new Error("sky export is missing");
+}
+if (typeof mod.sky.list_windows !== "function") {
+  throw new Error("sky.list_windows export is missing");
+}
+const windows = await mod.sky.list_windows();
+if (!Array.isArray(windows)) {
+  throw new Error(`sky.list_windows returned ${typeof windows}`);
+}
+console.log(JSON.stringify({
+  ok: true,
+  exports: Object.keys(mod).sort(),
+  method: "list_windows",
+  resultType: "array",
+  count: windows.length,
+}));
+'@
+  $entryUri = ([Uri]$entryPath).AbsoluteUri
+  $temp = Join-Path $env:TEMP ('codex-computer-use-runtime-import-' + [guid]::NewGuid().ToString('N') + '.mjs')
+  try {
+    Write-Utf8NoBom $temp $script
+    $output = & $node.Source $temp $entryUri
+    if ($LASTEXITCODE -ne 0) {
+      throw "independent Computer Use runtime import verification failed for $entryPath"
+    }
+    if ($output) {
+      Write-Log "runtime import ok: $output"
+    }
+  } finally {
+    Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Test-OfficialComputerUseCache {
   param(
     [string]$CodexHomeResolved,
@@ -1796,10 +1914,14 @@ function Test-OfficialComputerUseCache {
   $sourceRoot = Join-Path $InstalledMarketplaceRoot 'plugins\computer-use'
   $version = Get-PluginVersion $sourceRoot
   $cacheVersionRoot = Join-Path $CodexHomeResolved "plugins\cache\openai-bundled\computer-use\$version"
+  $sourceClientPath = Join-Path $sourceRoot 'scripts\computer-use-client.mjs'
+  $cachedClientPath = Join-Path $cacheVersionRoot 'scripts\computer-use-client.mjs'
   $requiredCachePaths = @(
-    (Join-Path $cacheVersionRoot '.codex-plugin\plugin.json'),
-    (Join-Path $cacheVersionRoot 'scripts\computer-use-client.mjs')
+    (Join-Path $cacheVersionRoot '.codex-plugin\plugin.json')
   )
+  if (Test-Path -LiteralPath $sourceClientPath -PathType Leaf) {
+    $requiredCachePaths += $cachedClientPath
+  }
   foreach ($path in $requiredCachePaths) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
       throw "official Computer Use cache is incomplete: $path"
@@ -1827,21 +1949,46 @@ function Test-OfficialComputerUseCache {
   $runtimeSkyRoot = Get-CuaSkyRuntimeRoot
   $runtimeRequired = @(
     (Join-Path $runtimeSkyRoot 'package.json'),
-    (Join-Path $runtimeSkyRoot 'bin\windows\codex-computer-use.exe'),
-    (Join-Path $runtimeSkyRoot 'dist\project\cua\sky_js\src\targets\windows\internal\computer_use_client_base.js'),
-    (Join-Path $runtimeSkyRoot 'dist\project\cua\sky_js\src\targets\windows\internal\helper_transport.js')
+    (Join-Path $runtimeSkyRoot 'dist\project\cua\sky_js\src\index.js')
   )
+  if (Test-Path -LiteralPath $sourceClientPath -PathType Leaf) {
+    $runtimeRequired += @(
+      (Join-Path $runtimeSkyRoot 'bin\windows\codex-computer-use.exe'),
+      (Join-Path $runtimeSkyRoot 'dist\project\cua\sky_js\src\targets\windows\internal\computer_use_client_base.js'),
+      (Join-Path $runtimeSkyRoot 'dist\project\cua\sky_js\src\targets\windows\internal\helper_transport.js')
+    )
+  }
   foreach ($path in $runtimeRequired) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
       throw "official Computer Use runtime is incomplete: $path"
     }
   }
 
-  $clientPath = Join-Path $cacheVersionRoot 'scripts\computer-use-client.mjs'
-  $helperCommandPath = Join-Path $runtimeSkyRoot 'bin\windows\codex-computer-use.exe'
-  $helperTransportPath = Join-Path $runtimeSkyRoot 'dist\project\cua\sky_js\src\targets\windows\internal\helper_transport.js'
-  Test-ComputerUseClientImport $clientPath
-  Test-HelperTransport $helperTransportPath $helperCommandPath
+  if (Test-Path -LiteralPath $sourceClientPath -PathType Leaf) {
+    $helperCommandPath = Join-Path $runtimeSkyRoot 'bin\windows\codex-computer-use.exe'
+    $helperTransportPath = Join-Path $runtimeSkyRoot 'dist\project\cua\sky_js\src\targets\windows\internal\helper_transport.js'
+    Test-ComputerUseClientImport $cachedClientPath
+    Test-HelperTransport $helperTransportPath $helperCommandPath
+  } else {
+    Test-ComputerUseRuntimeImport $runtimeSkyRoot
+  }
+
+  $stableMarketplaceRoot = Get-StableBundledMarketplaceRoot $codexHomeResolved
+  $installedChromeRoot = Join-Path $InstalledMarketplaceRoot 'plugins\chrome'
+  $chromeVersion = Get-PluginVersion $installedChromeRoot
+  $chromeBrowserClientPaths = @(
+    (Join-Path $stableMarketplaceRoot 'plugins\chrome\scripts\browser-client.mjs'),
+    (Join-Path $codexHomeResolved "plugins\cache\openai-bundled\chrome\$chromeVersion\scripts\browser-client.mjs")
+  )
+  foreach ($browserClientPath in $chromeBrowserClientPaths) {
+    if (-not (Test-Path -LiteralPath $browserClientPath -PathType Leaf)) {
+      throw "Chrome browser client is missing: $browserClientPath"
+    }
+    $browserClientContent = [System.IO.File]::ReadAllText($browserClientPath, [System.Text.UTF8Encoding]::new($false))
+    if (-not (Test-BrowserClientProcessShimCompatible $browserClientContent)) {
+      throw "Chrome browser client process shim compatibility is missing or unrecognized: $browserClientPath"
+    }
+  }
   Write-Log "official lightweight cache verification ok: computer-use@$version / runtime=$runtimeSkyRoot"
 }
 
@@ -1871,9 +2018,10 @@ function Install-ComputerUse {
   $browserCacheRoot = Sync-OpenAiBundledPluginCache $installedMarketplaceRoot 'browser'
   $chromeCacheRoot = Sync-OpenAiBundledPluginCache $installedMarketplaceRoot 'chrome'
   Patch-ChromeWindowsRegistryParsing $chromeCacheRoot
-  if (Test-BundledMarketplacePluginAvailable $installedMarketplaceRoot 'sites') {
+  $sitesInstalled = Test-BundledMarketplacePluginInstalledWithCodexCli 'sites'
+  if ($sitesInstalled -and (Test-BundledMarketplacePluginAvailable $installedMarketplaceRoot 'sites')) {
     $sitesCacheRoot = Sync-OpenAiBundledPluginCache $installedMarketplaceRoot 'sites'
-    Write-Log "installed cached plugin: $sitesCacheRoot"
+    Write-Log "refreshed existing optional plugin cache: $sitesCacheRoot"
   }
 
   Update-ChromeNativeMessagingManifest $chromeCacheRoot
@@ -1884,15 +2032,9 @@ function Install-ComputerUse {
   Update-CodexConfig $marketplaceRoot
 
   # A cache plus a hand-written enabled entry is not an installed plugin to the
-  # current CLI. Full repairs can opt into every complete shipped descriptor;
-  # targeted Computer Use repairs keep the narrower browser-only behavior.
-  $pluginNamesToRegister = @('browser')
-  if ($InstallAllBundledPlugins) {
-    $pluginNamesToRegister = @(Get-BundledMarketplacePluginNames $marketplaceRoot)
-  }
-  foreach ($pluginName in $pluginNamesToRegister) {
-    Install-BundledMarketplacePluginWithCodexCli $pluginName
-  }
+  # current CLI. Browser is part of this repair; unrelated optional plugins keep
+  # their existing installed/enabled state.
+  Install-BundledMarketplacePluginWithCodexCli 'browser'
   Update-CodexConfig $marketplaceRoot
 
   Write-Log "installed marketplace plugin: $pluginSourceRoot"
@@ -1903,9 +2045,9 @@ function Install-ComputerUse {
 function Test-ComputerUse {
   $codexHomeResolved = Resolve-ExistingDirectory $CodexHome
   $installedMarketplaceRoot = Get-InstalledBundledMarketplaceRoot
-  if ($InstallAllBundledPlugins) {
+  if ($VerifyAllBundledPluginsAvailable) {
     $stableMarketplaceRoot = Get-StableBundledMarketplaceRoot $codexHomeResolved
-    Test-AllBundledMarketplacePluginsWithCodexCli $stableMarketplaceRoot
+    Test-AllBundledMarketplacePluginsAvailableWithCodexCli $stableMarketplaceRoot $installedMarketplaceRoot
   }
   $officialCacheLatest = Join-Path $codexHomeResolved 'plugins\cache\openai-bundled\computer-use\latest'
   $legacyLatestMarkers = @(
@@ -1934,7 +2076,8 @@ function Test-ComputerUse {
   $browserPluginRoot = Join-Path $marketplaceRoot 'plugins\browser'
   $chromePluginRoot = Join-Path $marketplaceRoot 'plugins\chrome'
   $sitesPluginRoot = Join-Path $marketplaceRoot 'plugins\sites'
-  $sitesAvailable = Test-BundledMarketplacePluginAvailable $marketplaceRoot 'sites'
+  $sitesInstalled = (Test-BundledMarketplacePluginAvailable $marketplaceRoot 'sites') -and
+    (Test-BundledMarketplacePluginInstalledWithCodexCli 'sites')
   $browserVersion = Get-PluginVersion $browserPluginRoot
   $chromeVersion = Get-PluginVersion $chromePluginRoot
   $browserCacheLatest = Join-Path $codexHomeResolved 'plugins\cache\openai-bundled\browser\latest'
@@ -1943,7 +2086,7 @@ function Test-ComputerUse {
   $chromeCacheVersionRoot = Join-Path $codexHomeResolved "plugins\cache\openai-bundled\chrome\$chromeVersion"
   $sitesCacheLatest = $null
   $sitesCacheVersionRoot = $null
-  if ($sitesAvailable) {
+  if ($sitesInstalled) {
     $sitesVersion = Get-PluginVersion $sitesPluginRoot
     $sitesCacheLatest = Join-Path $codexHomeResolved 'plugins\cache\openai-bundled\sites\latest'
     $sitesCacheVersionRoot = Join-Path $codexHomeResolved "plugins\cache\openai-bundled\sites\$sitesVersion"
@@ -1974,7 +2117,7 @@ function Test-ComputerUse {
     $computerUseBasePath,
     $helperTransportPath
   )
-  if ($sitesAvailable) {
+  if ($sitesInstalled) {
     $required += @(
       (Join-Path $sitesPluginRoot '.codex-plugin\plugin.json'),
       (Join-Path $sitesCacheVersionRoot '.codex-plugin\plugin.json'),
@@ -2019,7 +2162,7 @@ function Test-ComputerUse {
       Write-Log "bundled plugin latest junction not present; verified versioned cache fallback: $optionalLatestPath"
     }
   }
-  if ($sitesAvailable) {
+  if ($sitesInstalled) {
     $latestPathsToCheck += $sitesCacheLatest
   }
 

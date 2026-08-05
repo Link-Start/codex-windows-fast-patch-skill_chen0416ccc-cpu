@@ -141,8 +141,8 @@ Copy-Item -Recurse -Force -LiteralPath (Join-Path $source 'assets') -Destination
 
 - 补丁日志包含 `fast-mode UI patch result`、`locale i18n patch result` 和 `browser-use gate patch result`，结果为 `patched` 或 `already-patched`。
 - Fast Mode 本地线缆验证能在 `/v1/responses` 的 HTTP 请求体或 WebSocket 帧里捕获 `service_tier=priority`；如果 `codex exec` 未发出请求，验证器会回退到 app-server，并额外确认 `thread/start serviceTier=priority`。
-- 如果本次修复包含 bundled 插件，`codex plugin list` 应显示 `openai-bundled` 下的 `sites`、`browser`、`chrome`、`computer-use`、`latex` 都为 `installed, enabled`。用户要求恢复全部 bundled 功能时，给主 wrapper 加 `-InstallAllBundledPlugins`；它会按当前稳定 marketplace 的实际完整描述符注册并验证所有插件，包括随版本新增的 `deep-research`、`visualize`，而不是依赖固定列表。
-- Desktop 日志应显示 bundled marketplace 保留 `pluginNames=["sites","browser","chrome","computer-use","latex"]`，且不再出现新的 `not_in_bundled_marketplace_plugin_names` / `sites`。
+- 如果本次修复包含浏览器和 Computer Use，`codex plugin list` 应显示 `browser`、`chrome`、`computer-use` 为 `installed, enabled`；`sites`、`latex`、`deep-research`、`visualize` 等无关可选插件必须保留用户原有状态。给主 wrapper 加 `-VerifyAllBundledPluginsAvailable` 会在正常修复/DryRun 流程中附加 availability 断言；断言本身不联网下载、不执行 `plugin add`、不启用可选插件，但 wrapper 的其它修复步骤仍可能写入状态。完全只读时直接运行 `install-computer-use-local.ps1 -StrictVerifyOnly -VerifyAllBundledPluginsAvailable`。
+- Desktop 日志应保留当前安装包的 bundled descriptor 名称，并且不应通过 `not_in_bundled_marketplace_plugin_names` 删除用户原本已安装的插件；descriptor 存在不等于插件已安装。
 - 如果本次修复包含浏览器能力，Desktop 日志里 `browser_use_availability_resolved` 显示 `available=true` 和 `reason=local-patched`。
 - 如果修复 Win10 截图 helper，patcher 应报告已验证 patched SHA-256；Explorer 首帧/连续帧、任务管理器动态帧、文字读取、窗口枚举和预热后资源稳定性都应通过。
 - 如果需要 Chrome 控制，`codex plugin list` 显示 `chrome@openai-bundled` 为 `installed, enabled`，native messaging host manifest 指向存在的文件，并且真实 smoke test 能读到受控标签页标题，例如 `Example Domain`。Chrome 未运行时，无需再次征得用户授权，直接自动启动后验证 `https://example.com/`、`Example Domain` 标题和唯一且文本匹配的 `h1`。

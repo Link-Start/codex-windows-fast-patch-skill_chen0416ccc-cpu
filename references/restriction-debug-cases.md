@@ -137,7 +137,7 @@ Checks:
 
 - Run `codex plugin list` before package operations. If `sites@openai-bundled`, `chrome@openai-bundled`, `browser@openai-bundled`, or `computer-use@openai-bundled` are missing, disabled, or blocked by a marketplace snapshot error, treat that as local bundled marketplace evidence first.
 - Run `scripts\install-computer-use-local.ps1 -StrictVerifyOnly` before package operations. A failure on a stale Chrome native messaging manifest, missing `latest` link, missing helper path, missing plugin file, or `@oai/sky` import/runtime path is local repair evidence.
-- Read `[marketplaces.openai-bundled].source` from `config.toml`, then inspect `.agents\plugins\marketplace.json` under that stable root; in current Windows builds it should retain `sites`, `browser`, `chrome`, `computer-use`, and `latex`.
+- Read `[marketplaces.openai-bundled].source` from `config.toml`, then inspect `.agents\plugins\marketplace.json` under that stable root and compare its names with the current package manifest. Descriptor presence means available, not installed.
 - Inspect `plugins\computer-use` under the configured stable marketplace. Do not use the Desktop-owned `.tmp\bundled-marketplaces` copy as the final configured source.
 - Inspect running `extension-host` processes whose paths are under `%USERPROFILE%\.codex\plugins\cache\openai-bundled`.
 - Inspect `%USERPROFILE%\.codex\chrome-native-hosts.json`; remove stale entries whose `extensionHostPath` or `browserClientPath` points to a missing file.
@@ -180,13 +180,13 @@ Get-ChildItem -LiteralPath $root -Recurse -File |
 ```
 
 - Inspect the extracted main bundle or live ASAR for `isAvailable:({features:e})=>e.sites` near the bundled plugin descriptors. That shape means package resources can contain `sites`, but runtime filtering can still remove it when `features.sites` is false.
-- Confirm that the stable root configured under `[marketplaces.openai-bundled]` has at least the five required plugin directories after repair: `sites`, `browser`, `chrome`, `computer-use`, and `latex`.
+- Confirm that every descriptor declared by the current package has a matching plugin directory under the stable root. Do not install or enable optional plugins merely to make this check pass; use `-StrictVerifyOnly -VerifyAllBundledPluginsAvailable` for structured availability validation.
 
 Action:
 
 - Use the targeted bundled marketplace patch with `-OnlyBundledMarketplaceCopy` and a non-system `-OutputRoot` when the user is avoiding C: drive pressure.
 - After install and relaunch, run `scripts\install-computer-use-local.ps1 -VerifyOnly` to rebuild the local mirror/cache, then `-StrictVerifyOnly`.
-- If `sites` was already uninstalled, rerun `install-computer-use-local.ps1 -VerifyOnly`; when the installed bundled marketplace provides `sites`, the repair re-enables it and rebuilds its stable cache automatically.
+- If `sites` is available but not installed, `install-computer-use-local.ps1 -VerifyOnly` must leave it uninstalled. If it was already installed, the repair may refresh its stable cache while preserving that state.
 - Verify recent logs show the five-plugin set and no new `not_in_bundled_marketplace_plugin_names` for `sites`.
 - Do not run Phone Remote Control scripts for this class. Do not run a full Fast/browser/Computer Use repatch unless separate logs show a closed Desktop gate such as `reason=statsig-disabled`.
 
@@ -204,14 +204,14 @@ Checks:
 
 - Inspect the installed package with `Get-AppxPackage -Name OpenAI.Codex | Select-Object Version,SignatureKind,InstallLocation`.
 - Check both `app\resources\app.asar` and `app\resources\codex.exe` under the current `InstallLocation`. Do not assume `codex.exe` being a PE file means the ASAR route is gone.
-- Inspect `%USERPROFILE%\.codex\plugins\cache\openai-bundled\computer-use\latest\scripts\computer-use-client.mjs`.
+- Inspect the installed Computer Use descriptor first. If it ships `scripts\computer-use-client.mjs`, inspect the matching cache copy; if it is descriptor-only, inspect the versioned `.codex-plugin\plugin.json` and independent `%LOCALAPPDATA%\OpenAI\Codex\runtimes\cua_node` `@oai/sky` entry instead.
 - Inspect `%LOCALAPPDATA%\OpenAI\Codex\runtimes\cua_node\*\bin\node_modules\@oai\sky\package.json`, especially the `exports` map. Newer runtime packages may export only `"."`, which breaks deep bare imports from plugin scripts.
 - Inspect `%USERPROFILE%\.codex\config.toml` for stale `[mcp_servers.node_repl.env]` entries named `SKY_CUA_NATIVE_PIPE` or `SKY_CUA_NATIVE_PIPE_DIRECTORY`.
 
 Action:
 
 - Run `scripts\install-computer-use-local.ps1 -VerifyOnly` to rebuild the local bundled plugin mirror, stable cache links, CUA runtime overlay, Chrome native host paths, and config cleanup.
-- Run `scripts\install-computer-use-local.ps1 -StrictVerifyOnly` immediately after. Treat `client import ok` and `helper transport ok` as the local repair success signal.
+- Run `scripts\install-computer-use-local.ps1 -StrictVerifyOnly` immediately after. Legacy layouts require `client import ok` and `helper transport ok`; descriptor-only layouts require `runtime import ok` with a real `sky.list_windows` array result.
 - If `-StrictVerifyOnly` fails because a cache link or plugin file is missing, rerun `-VerifyOnly` once, then rerun `-StrictVerifyOnly`.
 - In 26.609-style caches, `browser\latest` or `chrome\latest` may be absent while the versioned cache directory still exists. Do not treat that as a Computer Use failure by itself; require the versioned browser/chrome plugin manifests and only validate a support-plugin `latest` junction when it exists.
 - If verification succeeds but Desktop still reports native pipe unavailable, fully quit and relaunch Codex Desktop, then inspect the newest Desktop log for `computer-use native pipe startup ready`.
