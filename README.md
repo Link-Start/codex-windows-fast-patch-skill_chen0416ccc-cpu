@@ -41,7 +41,7 @@
 - `scripts/patch-remote-control-windows-msix.ps1`：手机远控 MSIX / ASAR 补丁和 marker 校验参考实现。
 - `scripts/patch-remote-control-asar.cjs`：手机远控 Electron bundle patcher。
 - `scripts/build-remote-control-native-replacement.ps1`：当 native app-server 因 API-key 主认证拒绝手机远控时，在指定工作目录下构建 patched `app\resources\codex.exe` replacement。默认从安装包副本自动识别原生版本；内置映射包括在 Desktop `26.715.2305.0` 上完成精确 tag 构建、安装和手机端到端实测的 `0.145.0-alpha.18`，在 Desktop `26.707.3748.0` 上完成同类验证的 `0.144.0-alpha.4`，以及仅通过 patch-apply 验证的历史 `0.142.4`。其他版本必须提供严格匹配的 `-CodexSourceRef`、`-AppServerVersion` 和已验证的 `-PatchPathOverride`。
-- `scripts/install-computer-use-local.ps1`：Windows Computer Use 本地兼容文件安装和校验参考实现；兼容旧式 `latest + plugin-local node_modules` 和新版“版本缓存 + `%LOCALAPPDATA%` 独立 cua_node runtime”布局，避免把正常新版误判为损坏。
+- `scripts/install-computer-use-local.ps1`：Windows Computer Use 与 Chrome 本地运行时安装和校验参考实现；兼容旧式 `latest + plugin-local node_modules` 和新版“版本缓存 + `%LOCALAPPDATA%` 独立 cua_node runtime”布局，并同步 Chrome 外层 native-host manifest、`extension-host-config.json` 与两份 schema-2 app-server 状态文件。
 - `scripts/patch-computer-use-helper-win10.ps1`：为精确支持哈希的 `@oai/sky 0.4.20` 和 `0.5.2` helper 提供只读识别、安装和回滚；`26.707.12708.0` 与 `26.721.4979.0` 是各自的端到端验证基线，不是版本门槛。
 - `scripts/sync-codex-provider-history.ps1`：同步本地会话 provider 元数据，让切换 `model_provider` 后消失的会话重新出现在官方列表中；也可用 `-RepairMissingCwdDirs` 修复恢复后会话无法继续的缺失 `cwd` 目录。默认不改 `config.toml`，也不改 workspace/project roots。
 - `scripts/install-model-instructions-file.ps1`：可选安装内置 `model_instructions_file` 提示词资源。
@@ -145,7 +145,7 @@ Copy-Item -Recurse -Force -LiteralPath (Join-Path $source 'assets') -Destination
 - Desktop 日志应保留当前安装包的 bundled descriptor 名称，并且不应通过 `not_in_bundled_marketplace_plugin_names` 删除用户原本已安装的插件；descriptor 存在不等于插件已安装。
 - 如果本次修复包含浏览器能力，Desktop 日志里 `browser_use_availability_resolved` 显示 `available=true` 和 `reason=local-patched`。
 - 如果修复 Win10 截图 helper，patcher 应报告已验证 patched SHA-256；Explorer 首帧/连续帧、任务管理器动态帧、文字读取、窗口枚举和预热后资源稳定性都应通过。
-- 如果需要 Chrome 控制，`codex plugin list` 显示 `chrome@openai-bundled` 为 `installed, enabled`；native messaging host manifest 的路径和注册表值指向当前稳定缓存；`allowed_origins` 与缓存 `scripts\extension-ids.json` 顶层 ID 精确一致；`extension-host-config.json` 包含与当前安装包匹配的本地 `codex.exe` 以及同一当前运行时的 `node.exe` / `node_repl.exe`。随后真实 smoke test 应能读到受控标签页标题，例如 `Example Domain`。Chrome 未运行时，无需再次征得用户授权，直接自动启动后验证 `https://example.com/`、`Example Domain` 标题和唯一且文本匹配的 `h1`。
+- 如果需要 Chrome 控制，`codex plugin list` 显示 `chrome@openai-bundled` 为 `installed, enabled`；native messaging host manifest 的路径和注册表值指向当前稳定缓存；`allowed_origins` 与缓存 `scripts\extension-ids.json` 顶层 ID 精确一致；`extension-host-config.json` 包含与当前安装包匹配的本地 `codex.exe` 以及同一当前运行时的 `node.exe` / `node_repl.exe`；`%LOCALAPPDATA%\OpenAI\Codex\chrome-native-hosts-v2.json` 与 `%USERPROFILE%\.codex\chrome-native-hosts-v2.json` 都包含当前版本、官方哈希身份和全部现存路径。随后真实 smoke test 应能读到受控标签页标题，例如 `Example Domain`。Chrome 未运行时，无需再次征得用户授权，直接自动启动后验证 `https://example.com/`、`Example Domain` 标题和唯一且文本匹配的 `h1`。
 - 如果修复手机远控，连接页应显示手机/移动设备设置路径，二维码应出现，手机扫码不再提示 Codex 版本过期；按 WindowsApps native PID/路径关联的日志应出现 `remote_control_websocket_proxy_connected` 和 `Connected` 且没有重复 `os error 10060`，手机发送消息能到达 Desktop。部分 native 版本会静默处理 Ping/Pong，因此不得把帧日志文字当作唯一成功条件。
 - 如果修复会话消失，`sync-codex-provider-history.ps1` 应显示 App/legacy SQLite 和 readable rollout 的 provider 已对齐到当前 `model_provider`，`config.toml sha256 unchanged`，官方侧边栏能看到历史会话，并且不会新增空项目分组。如果修的是“恢复后无法继续”，`missing rollout cwd dirs after` 应为 0 或只剩已审查跳过的路径，受影响会话重启后能发送新消息。
 

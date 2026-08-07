@@ -1016,38 +1016,88 @@ function Stop-OpenAiBundledExtensionHosts {
     return
   }
 
-  $stopped = 0
-  $stoppedProcessIds = @()
-  foreach ($process in (Get-Process -Name 'extension-host' -ErrorAction SilentlyContinue)) {
-    $processPath = $null
-    try {
-      $processPath = $process.Path
-    } catch {
-      continue
-    }
-    if ([string]::IsNullOrWhiteSpace($processPath)) {
-      continue
-    }
+  $timeoutMilliseconds = 15000L
+  $quietMilliseconds = 2000L
+  $pollMilliseconds = 100
+  $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+  $quietStartedAt = -1L
+  $seenIdentities = @{}
+  $lastMatches = @()
 
-    foreach ($rootPath in $resolvedRoots) {
-      if ($processPath.StartsWith($rootPath + '\', [StringComparison]::OrdinalIgnoreCase)) {
-        Write-Log "stopping bundled plugin lock holder: extension-host pid=$($process.Id)"
-        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-        $stoppedProcessIds += $process.Id
-        $stopped += 1
-        break
+  while ($stopwatch.ElapsedMilliseconds -lt $timeoutMilliseconds) {
+    $matchedCount = 0
+    $currentMatches = @()
+    foreach ($process in @(Get-Process -Name 'extension-host' -ErrorAction SilentlyContinue)) {
+      try {
+        $null = $process.Handle
+        $processPath = $process.Path
+        if ([string]::IsNullOrWhiteSpace($processPath)) {
+          throw "unable to inspect extension-host path: pid=$($process.Id)"
+        }
+
+        $matchesRoot = $false
+        foreach ($rootPath in $resolvedRoots) {
+          if ($processPath.StartsWith($rootPath + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            $matchesRoot = $true
+            break
+          }
+        }
+        if (-not $matchesRoot) {
+          continue
+        }
+
+        $matchedCount += 1
+        $startedTicks = $process.StartTime.ToUniversalTime().Ticks
+        $identity = "$($process.Id):$startedTicks"
+        $description = "pid=$($process.Id) startedTicks=$startedTicks path=$processPath"
+        $currentMatches += $description
+        if (-not $seenIdentities.ContainsKey($identity)) {
+          $seenIdentities[$identity] = $true
+          Write-Log "stopping bundled plugin lock holder: $description"
+        }
+
+        try {
+          $process.Kill()
+        } catch [System.InvalidOperationException] {
+          # It exited after enumeration.
+        } catch {
+          $hasExited = $false
+          try {
+            $hasExited = $process.HasExited
+          } catch {
+            $hasExited = $false
+          }
+          if (-not $hasExited) {
+            throw "failed to stop bundled plugin lock holder ${description}: $($_.Exception.Message)"
+          }
+        }
+      } catch [System.InvalidOperationException] {
+        # It exited while its handle, path, or start time was being acquired.
+      } finally {
+        $process.Dispose()
       }
     }
-  }
 
-  if ($stopped -gt 0) {
-    foreach ($processId in $stoppedProcessIds) {
-      Wait-Process -Id $processId -Timeout 5 -ErrorAction SilentlyContinue
-      if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
-        throw "bundled plugin lock holder did not stop: extension-host pid=$processId"
+    if ($matchedCount -gt 0) {
+      $quietStartedAt = -1L
+      $lastMatches = $currentMatches
+    } else {
+      if ($quietStartedAt -lt 0) {
+        $quietStartedAt = $stopwatch.ElapsedMilliseconds
+      }
+      if (($stopwatch.ElapsedMilliseconds - $quietStartedAt) -ge $quietMilliseconds) {
+        return
       }
     }
+    Start-Sleep -Milliseconds $pollMilliseconds
   }
+
+  $detail = if ($lastMatches.Count -gt 0) {
+    $lastMatches -join '; '
+  } else {
+    'no process was present in the final scan, but the required quiet window was not established'
+  }
+  throw "bundled plugin lock holders did not remain stopped for ${quietMilliseconds}ms within ${timeoutMilliseconds}ms: $detail"
 }
 
 function Remove-StaleChromeNativeHostEntries {
@@ -1407,6 +1457,7 @@ function Get-ChromeNativeMessagingSettings {
   return [pscustomobject]@{
     AllowedOrigins = $allowedOrigins
     BrowserClientPath = (Join-Path $ChromeCacheRoot 'scripts\browser-client.mjs')
+    ExtensionIds = $extensionIds
     ExtensionHostConfigPath = (Join-Path $ChromeCacheRoot 'extension-host\windows\x64\extension-host-config.json')
     ExtensionIdsPath = $extensionIdsPath
     HostExecutable = (Join-Path $ChromeCacheRoot 'extension-host\windows\x64\extension-host.exe')
@@ -1674,6 +1725,497 @@ await installer.install({ appServerRuntimePaths });
   } finally {
     Remove-Item -LiteralPath $driverPath -Force -ErrorAction SilentlyContinue
   }
+}
+
+function Get-ChromeNativeHostV2StatePaths {
+  param([string]$CodexHomeResolved)
+
+  $localAppData = $env:LOCALAPPDATA
+  if ([string]::IsNullOrWhiteSpace($localAppData)) {
+    $localAppData = Join-Path $env:USERPROFILE 'AppData\Local'
+  }
+  $candidates = @(
+    (Join-Path $localAppData 'OpenAI\Codex\chrome-native-hosts-v2.json'),
+    (Join-Path $CodexHomeResolved 'chrome-native-hosts-v2.json')
+  )
+  $seen = @{}
+  $paths = @()
+  foreach ($candidate in $candidates) {
+    $fullPath = [System.IO.Path]::GetFullPath($candidate)
+    $key = $fullPath.ToLowerInvariant()
+    if (-not $seen.ContainsKey($key)) {
+      $seen[$key] = $true
+      $paths += $fullPath
+    }
+  }
+  return $paths
+}
+
+function Get-ChromeNativeHostV2Identity {
+  param(
+    [string]$Prefix,
+    [string[]]$Values
+  )
+
+  $payload = (($Values | ForEach-Object { [string]$_ }) -join ([char]0)) + [char]0
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $hash = ([System.BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+  } finally {
+    $sha256.Dispose()
+  }
+  return $Prefix + $hash.Substring(0, 32)
+}
+
+function Get-ChromeNativeHostV2ExpectedResource {
+  param(
+    [string]$ChromeCacheRoot,
+    [pscustomobject]$RuntimeInventory,
+    [string]$CodexHomeResolved
+  )
+
+  $settings = Get-ChromeNativeMessagingSettings $ChromeCacheRoot
+  if (-not (Test-Path -LiteralPath $settings.ManifestPath -PathType Leaf)) {
+    throw "Chrome native messaging manifest is missing before v2 registration: $($settings.ManifestPath)"
+  }
+  try {
+    $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $settings.ManifestPath | ConvertFrom-Json
+  } catch {
+    throw "failed to parse Chrome native messaging manifest before v2 registration $($settings.ManifestPath): $($_.Exception.Message)"
+  }
+  $extensionHostPath = [string]$manifest.path
+  $hostConfigPath = Join-Path (Split-Path -Parent $extensionHostPath) 'extension-host-config.json'
+  if (-not (Test-Path -LiteralPath $hostConfigPath -PathType Leaf)) {
+    throw "Chrome app-server host config is missing before v2 registration: $hostConfigPath"
+  }
+  try {
+    $hostConfig = Get-Content -Raw -Encoding UTF8 -LiteralPath $hostConfigPath | ConvertFrom-Json
+  } catch {
+    throw "failed to parse Chrome app-server host config before v2 registration ${hostConfigPath}: $($_.Exception.Message)"
+  }
+
+  $pluginVersion = Get-PluginVersion $ChromeCacheRoot
+  if ($pluginVersion -cnotmatch '^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$') {
+    throw "Chrome plugin version is not valid for the v2 native-host manifest: $pluginVersion"
+  }
+  $nodeModuleRoot = Join-Path (Split-Path -Parent $RuntimeInventory.NodePath) 'node_modules'
+  $requiredFiles = @(
+    $extensionHostPath,
+    ([string]$hostConfig.browserClientPath),
+    $RuntimeInventory.CodexCliPath,
+    $RuntimeInventory.NodePath,
+    $RuntimeInventory.NodeReplPath
+  )
+  foreach ($requiredPath in $requiredFiles) {
+    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+      throw "Chrome v2 native-host resource has a missing required file: $requiredPath"
+    }
+  }
+  foreach ($requiredDirectory in @($RuntimeInventory.PackageResourcesRoot, $nodeModuleRoot)) {
+    if (-not (Test-Path -LiteralPath $requiredDirectory -PathType Container)) {
+      throw "Chrome v2 native-host resource has a missing required directory: $requiredDirectory"
+    }
+  }
+
+  $paths = [ordered]@{
+    browserClientPath = [string]$hostConfig.browserClientPath
+    codexCliPath = $RuntimeInventory.CodexCliPath
+    codexHome = $CodexHomeResolved
+    extensionHostPath = $extensionHostPath
+    nodePath = $RuntimeInventory.NodePath
+    nodeModuleDirs = @($nodeModuleRoot)
+    nodeReplPath = $RuntimeInventory.NodeReplPath
+    resourcesPath = $RuntimeInventory.PackageResourcesRoot
+  }
+  $channel = 'prod'
+  $entryIdentityValues = @($settings.HostName) + @($settings.ExtensionIds) + @(
+    $channel,
+    $pluginVersion,
+    $paths.extensionHostPath,
+    $paths.codexCliPath,
+    $paths.codexHome,
+    $paths.resourcesPath
+  )
+  $entryId = Get-ChromeNativeHostV2Identity -Prefix 'codex-runtime-' -Values $entryIdentityValues
+  $installId = Get-ChromeNativeHostV2Identity 'codex-install-' @(
+    $settings.HostName,
+    $paths.resourcesPath,
+    $paths.codexHome
+  )
+  $now = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture)
+  $startedAt = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture)
+
+  return [pscustomobject][ordered]@{
+    schemaVersion = 2
+    appServerProtocolVersion = 2
+    appVersion = $pluginVersion
+    channel = $channel
+    cliVersion = $pluginVersion
+    entryId = $entryId
+    extensionBuildChannels = @($channel)
+    extensionIds = @($settings.ExtensionIds)
+    installId = $installId
+    nativeHostNames = @($settings.HostName)
+    nativeHostProtocolVersion = 2
+    nativeHostVersion = $pluginVersion
+    paths = [pscustomobject]$paths
+    presence = [pscustomobject][ordered]@{
+      lastSeenAt = $now
+      pid = $PID
+      startedAt = $startedAt
+    }
+    proxyHost = '127.0.0.1'
+    proxyPort = 0
+    updatedAt = $now
+  }
+}
+
+function Test-ChromeNativeHostV2JsonObject {
+  param([object]$Value)
+
+  return $null -ne $Value -and (
+    $Value -is [pscustomobject] -or
+    $Value -is [System.Collections.IDictionary]
+  )
+}
+
+function Test-ChromeNativeHostV2JsonInteger {
+  param(
+    [object]$Value,
+    [decimal]$Minimum,
+    [decimal]$Maximum
+  )
+
+  if ($null -eq $Value) {
+    return $false
+  }
+  $numericTypeCodes = @(
+    [System.TypeCode]::Byte,
+    [System.TypeCode]::SByte,
+    [System.TypeCode]::Int16,
+    [System.TypeCode]::UInt16,
+    [System.TypeCode]::Int32,
+    [System.TypeCode]::UInt32,
+    [System.TypeCode]::Int64,
+    [System.TypeCode]::UInt64,
+    [System.TypeCode]::Single,
+    [System.TypeCode]::Double,
+    [System.TypeCode]::Decimal
+  )
+  if ($numericTypeCodes -notcontains [System.Type]::GetTypeCode($Value.GetType())) {
+    return $false
+  }
+  try {
+    $number = [decimal]$Value
+  } catch {
+    return $false
+  }
+  return [decimal]::Truncate($number) -eq $number -and $number -ge $Minimum -and $number -le $Maximum
+}
+
+function Test-ChromeNativeHostV2JsonString {
+  param([object]$Value)
+
+  return $Value -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$Value)
+}
+
+function Test-ChromeNativeHostV2JsonStringArray {
+  param([object]$Value)
+
+  if (-not ($Value -is [System.Array])) {
+    return $false
+  }
+  foreach ($item in $Value) {
+    if (-not (Test-ChromeNativeHostV2JsonString $item)) {
+      return $false
+    }
+  }
+  return $true
+}
+
+function Test-ChromeNativeHostV2DocumentSchema {
+  param([object]$Document)
+
+  if (-not (Test-ChromeNativeHostV2JsonObject $Document)) {
+    return $false
+  }
+  $schemaVersionProperty = $Document.PSObject.Properties['schemaVersion']
+  $entriesProperty = $Document.PSObject.Properties['entries']
+  return $null -ne $schemaVersionProperty -and
+    (Test-ChromeNativeHostV2JsonInteger $schemaVersionProperty.Value 2 2) -and
+    $null -ne $entriesProperty -and
+    $entriesProperty.Value -is [System.Array]
+}
+
+function Test-ChromeNativeHostV2EntrySchema {
+  param([object]$Entry)
+
+  if (-not (Test-ChromeNativeHostV2JsonObject $Entry)) {
+    return $false
+  }
+
+  foreach ($specification in @(
+    @('schemaVersion', 2, 2),
+    @('appServerProtocolVersion', 2, 2),
+    @('nativeHostProtocolVersion', 2, 2),
+    @('proxyPort', 0, 65535)
+  )) {
+    $property = $Entry.PSObject.Properties[[string]$specification[0]]
+    if ($null -eq $property -or -not (Test-ChromeNativeHostV2JsonInteger $property.Value $specification[1] $specification[2])) {
+      return $false
+    }
+  }
+
+  foreach ($propertyName in @(
+    'appVersion',
+    'channel',
+    'cliVersion',
+    'entryId',
+    'installId',
+    'nativeHostVersion',
+    'proxyHost',
+    'updatedAt'
+  )) {
+    $property = $Entry.PSObject.Properties[$propertyName]
+    if ($null -eq $property -or -not (Test-ChromeNativeHostV2JsonString $property.Value)) {
+      return $false
+    }
+  }
+  foreach ($propertyName in @('appVersion', 'cliVersion', 'nativeHostVersion')) {
+    if ([string]$Entry.$propertyName -cnotmatch '^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$') {
+      return $false
+    }
+  }
+
+  foreach ($propertyName in @('extensionBuildChannels', 'extensionIds', 'nativeHostNames')) {
+    $property = $Entry.PSObject.Properties[$propertyName]
+    if ($null -eq $property -or -not (Test-ChromeNativeHostV2JsonStringArray $property.Value)) {
+      return $false
+    }
+  }
+
+  $pathsProperty = $Entry.PSObject.Properties['paths']
+  if ($null -eq $pathsProperty -or -not (Test-ChromeNativeHostV2JsonObject $pathsProperty.Value)) {
+    return $false
+  }
+  $paths = $pathsProperty.Value
+  foreach ($propertyName in @('codexCliPath', 'codexHome', 'extensionHostPath', 'nodePath', 'resourcesPath')) {
+    $property = $paths.PSObject.Properties[$propertyName]
+    if ($null -eq $property -or -not (Test-ChromeNativeHostV2JsonString $property.Value)) {
+      return $false
+    }
+  }
+  foreach ($propertyName in @('browserClientPath', 'nodeReplPath')) {
+    $property = $paths.PSObject.Properties[$propertyName]
+    if ($null -ne $property -and -not (Test-ChromeNativeHostV2JsonString $property.Value)) {
+      return $false
+    }
+  }
+  $nodeModuleDirsProperty = $paths.PSObject.Properties['nodeModuleDirs']
+  if ($null -ne $nodeModuleDirsProperty -and -not (Test-ChromeNativeHostV2JsonStringArray $nodeModuleDirsProperty.Value)) {
+    return $false
+  }
+
+  $presenceProperty = $Entry.PSObject.Properties['presence']
+  if ($null -ne $presenceProperty) {
+    $presence = $presenceProperty.Value
+    if (-not (Test-ChromeNativeHostV2JsonObject $presence)) {
+      return $false
+    }
+    foreach ($propertyName in @('lastSeenAt', 'startedAt')) {
+      $property = $presence.PSObject.Properties[$propertyName]
+      if ($null -eq $property -or -not (Test-ChromeNativeHostV2JsonString $property.Value)) {
+        return $false
+      }
+    }
+    $pidProperty = $presence.PSObject.Properties['pid']
+    if ($null -eq $pidProperty -or -not (Test-ChromeNativeHostV2JsonInteger $pidProperty.Value 1 ([long]::MaxValue))) {
+      return $false
+    }
+  }
+  return $true
+}
+
+function Test-ChromeNativeHostV2EntryCoreEqual {
+  param(
+    [object]$Actual,
+    [object]$Expected
+  )
+
+  if (-not (Test-ChromeNativeHostV2EntrySchema $Actual) -or -not (Test-ChromeNativeHostV2EntrySchema $Expected)) {
+    return $false
+  }
+  foreach ($propertyName in @('schemaVersion', 'appServerProtocolVersion', 'nativeHostProtocolVersion', 'proxyPort')) {
+    if ([decimal]$Actual.$propertyName -ne [decimal]$Expected.$propertyName) {
+      return $false
+    }
+  }
+  foreach ($propertyName in @(
+    'appVersion',
+    'channel',
+    'cliVersion',
+    'entryId',
+    'installId',
+    'nativeHostVersion',
+    'proxyHost'
+  )) {
+    if ([string]$Actual.$propertyName -cne [string]$Expected.$propertyName) {
+      return $false
+    }
+  }
+  foreach ($propertyName in @('extensionBuildChannels', 'extensionIds', 'nativeHostNames')) {
+    if (-not (Test-OrdinalStringArrayEqual -Actual @($Actual.$propertyName) -Expected @($Expected.$propertyName))) {
+      return $false
+    }
+  }
+  foreach ($propertyName in @(
+    'browserClientPath',
+    'codexCliPath',
+    'codexHome',
+    'extensionHostPath',
+    'nodePath',
+    'nodeReplPath',
+    'resourcesPath'
+  )) {
+    if ([string]$Actual.paths.$propertyName -cne [string]$Expected.paths.$propertyName) {
+      return $false
+    }
+  }
+  return Test-OrdinalStringArrayEqual -Actual @($Actual.paths.nodeModuleDirs) -Expected @($Expected.paths.nodeModuleDirs)
+}
+
+function Test-ChromeNativeHostV2EntryReplacedBy {
+  param(
+    [object]$Actual,
+    [object]$Expected
+  )
+
+  $entryIdProperty = if (Test-ChromeNativeHostV2JsonObject $Actual) { $Actual.PSObject.Properties['entryId'] } else { $null }
+  if ($null -ne $entryIdProperty -and $entryIdProperty.Value -is [string] -and
+      [string]$entryIdProperty.Value -ceq [string]$Expected.entryId) {
+    return $true
+  }
+  if (-not (Test-ChromeNativeHostV2EntrySchema $Actual)) {
+    return $false
+  }
+  if ([string]$Actual.installId -cne [string]$Expected.installId -or [string]$Actual.channel -cne [string]$Expected.channel) {
+    return $false
+  }
+  $extensionOverlap = @($Actual.extensionIds | Where-Object { @($Expected.extensionIds) -ccontains [string]$_ }).Count -gt 0
+  $hostOverlap = @($Actual.nativeHostNames | Where-Object { @($Expected.nativeHostNames) -ccontains [string]$_ }).Count -gt 0
+  return $extensionOverlap -and $hostOverlap
+}
+
+function Write-ChromeNativeHostV2State {
+  param(
+    [string]$StatePath,
+    [pscustomobject]$ExpectedResource
+  )
+
+  $raw = $null
+  $entries = @()
+  if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
+    $raw = [System.IO.File]::ReadAllText($StatePath, [System.Text.UTF8Encoding]::new($false))
+    try {
+      $document = $raw | ConvertFrom-Json
+      if (Test-ChromeNativeHostV2DocumentSchema $document) {
+        $entries = @($document.entries)
+      } else {
+        Write-Log "warning: replacing invalid Chrome native-host v2 state: $StatePath"
+      }
+    } catch {
+      Write-Log "warning: replacing invalid Chrome native-host v2 state: $StatePath"
+    }
+  }
+
+  $existingCurrent = @($entries | Where-Object {
+    Test-ChromeNativeHostV2EntryCoreEqual $_ $ExpectedResource
+  } | Select-Object -First 1)
+  $resource = if ($existingCurrent.Count -gt 0) { $existingCurrent[0] } else { $ExpectedResource }
+  $nextEntries = @($entries | Where-Object {
+    -not (Test-ChromeNativeHostV2EntryReplacedBy $_ $ExpectedResource)
+  }) + @($resource)
+  $nextEntries = @($nextEntries | Sort-Object {
+    $hostName = [string]@($_.nativeHostNames)[0]
+    "$hostName`:$($_.channel)`:$($_.entryId)"
+  })
+  $nextDocument = [ordered]@{
+    schemaVersion = 2
+    entries = $nextEntries
+  }
+  $nextRaw = (($nextDocument | ConvertTo-Json -Depth 30) + "`n")
+  if ($null -ne $raw -and $raw -ceq $nextRaw) {
+    return $false
+  }
+
+  $parent = Split-Path -Parent $StatePath
+  New-Item -ItemType Directory -Force -Path $parent | Out-Null
+  if ($null -ne $raw) {
+    $backupPath = "$StatePath.$(Get-Date -Format 'yyyyMMdd-HHmmss-fff').bak"
+    Copy-Item -LiteralPath $StatePath -Destination $backupPath -Force
+    Write-Log "Chrome native-host v2 state backup: $backupPath"
+  }
+  $temporaryPath = "$StatePath.tmp-$([guid]::NewGuid().ToString('N'))"
+  $replaceBackupPath = "$StatePath.replace-$([guid]::NewGuid().ToString('N')).bak"
+  try {
+    Write-Utf8NoBom $temporaryPath $nextRaw
+    if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
+      [System.IO.File]::Replace($temporaryPath, $StatePath, $replaceBackupPath)
+    } else {
+      [System.IO.File]::Move($temporaryPath, $StatePath)
+    }
+  } finally {
+    Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $replaceBackupPath -Force -ErrorAction SilentlyContinue
+  }
+  Write-Log "updated Chrome native-host v2 state: $StatePath entry=$($ExpectedResource.entryId)"
+  return $true
+}
+
+function Update-ChromeNativeHostV2State {
+  param(
+    [string]$ChromeCacheRoot,
+    [pscustomobject]$RuntimeInventory,
+    [string]$CodexHomeResolved = (Resolve-OrCreateDirectory $CodexHome)
+  )
+
+  $expected = Get-ChromeNativeHostV2ExpectedResource $ChromeCacheRoot $RuntimeInventory $CodexHomeResolved
+  foreach ($statePath in @(Get-ChromeNativeHostV2StatePaths $CodexHomeResolved)) {
+    Write-ChromeNativeHostV2State $statePath $expected | Out-Null
+  }
+}
+
+function Test-ChromeNativeHostV2State {
+  param(
+    [string]$ChromeCacheRoot,
+    [pscustomobject]$RuntimeInventory,
+    [string]$CodexHomeResolved = (Resolve-ExistingDirectory $CodexHome)
+  )
+
+  $expected = Get-ChromeNativeHostV2ExpectedResource $ChromeCacheRoot $RuntimeInventory $CodexHomeResolved
+  $verifiedPaths = @()
+  foreach ($statePath in @(Get-ChromeNativeHostV2StatePaths $CodexHomeResolved)) {
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+      throw "Chrome native-host v2 state is missing: $statePath"
+    }
+    try {
+      $document = Get-Content -Raw -Encoding UTF8 -LiteralPath $statePath | ConvertFrom-Json
+    } catch {
+      throw "failed to parse Chrome native-host v2 state ${statePath}: $($_.Exception.Message)"
+    }
+    if (-not (Test-ChromeNativeHostV2DocumentSchema $document)) {
+      throw "Chrome native-host v2 state has an invalid schemaVersion or entries array: $statePath"
+    }
+    $matching = @($document.entries | Where-Object {
+      Test-ChromeNativeHostV2EntryCoreEqual $_ $expected
+    } | Select-Object -First 1)
+    if ($matching.Count -eq 0) {
+      throw "Chrome native-host v2 state has no current app-server entry: $statePath expected=$($expected.entryId)"
+    }
+    $verifiedPaths += $statePath
+  }
+  Write-Log "Chrome native-host v2 state verification ok: entry=$($expected.entryId) files=$($verifiedPaths.Count)"
 }
 
 function Test-OrdinalStringArrayEqual {
@@ -2461,6 +3003,7 @@ function Install-ComputerUse {
 
   $runtimeInventory = Get-CurrentCodexAppServerRuntimeInventory
   Invoke-ChromeOfficialManifestInstall $chromeCacheRoot $runtimeInventory
+  Update-ChromeNativeHostV2State $chromeCacheRoot $runtimeInventory $codexHomeResolved
 
   # Desktop can reconcile the mutable mirror while caches are being copied.
   # Re-merge shipped descriptors immediately before final verification.
@@ -2487,6 +3030,7 @@ function Test-ComputerUse {
   $runtimeInventory = Get-CurrentCodexAppServerRuntimeInventory
   Test-ChromeNativeMessagingManifest $installedChromeCacheRoot
   Test-ChromeAppServerHostConfig $installedChromeCacheRoot $runtimeInventory
+  Test-ChromeNativeHostV2State $installedChromeCacheRoot $runtimeInventory $codexHomeResolved
   if ($VerifyAllBundledPluginsAvailable) {
     $stableMarketplaceRoot = Get-StableBundledMarketplaceRoot $codexHomeResolved
     Test-AllBundledMarketplacePluginsAvailableWithCodexCli $stableMarketplaceRoot $installedMarketplaceRoot
