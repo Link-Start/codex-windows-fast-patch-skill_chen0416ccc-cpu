@@ -218,6 +218,30 @@ Action:
 - If verification succeeds but Desktop still reports native pipe unavailable, fully quit and relaunch Codex Desktop, then inspect the newest Desktop log for `computer-use native pipe startup ready`.
 - Only consider a full MSIX repack when Desktop logs or UI evidence show a closed feature gate. Do not patch `resources\codex.exe` or the ASAR just because the immediate failure is an `@oai/sky` package export/import error.
 
+## Existing MCP Commands Point At A Retired CUA Node Runtime
+
+Symptoms:
+
+- After a Codex Desktop Store update, one or more already-configured local MCP servers fail to start.
+- The affected `[mcp_servers.<name>].command` points under `%LOCALAPPDATA%\OpenAI\Codex\runtimes\cua_node\<old-runtime-id>\bin\node.exe`.
+- That executable is missing, or its runtime directory belongs to an earlier package while the current user-local CUA runtime uses another versioned directory.
+
+Checks:
+
+- Back up `%USERPROFILE%\.codex\config.toml` before changing any MCP entry, then parse the file as TOML and enumerate only the MCP servers actually configured on the machine. Do not assume a fixed server list or count.
+- Treat only missing commands inside the Codex-managed `%LOCALAPPDATA%\OpenAI\Codex\runtimes\cua_node` tree, or existing commands whose startup failure is reproduced and attributed to a retired Codex-managed runtime, as migration candidates. Leave an older but working runtime unchanged. Do not rewrite commands that use a system, user-managed, or project-managed Node installation.
+- Require the replacement `node.exe` and adjacent `node_repl.exe` to come from the same user-local runtime directory and to match the current installed package files by length and SHA-256. Resolve the final identity of both the expected CUA runtime root and each candidate; the candidate must remain under that resolved root. Reject candidates that land in WindowsApps, `.plugin-appserver`, or an unrelated root, while allowing the whole expected runtime root to be intentionally junctioned to another local drive.
+- Never execute the protected WindowsApps `node.exe` or `node_repl.exe` as a fallback. If no matching user-local runtime exists, launch Codex Desktop once to let it extract the runtime and retry; otherwise stop without changing MCP configuration.
+
+Action:
+
+- Update only an affected, already-configured MCP whose command is missing or whose startup failure is proven to follow the retired Codex-managed runtime. Replace only its `command` value; do not perform a file-wide runtime-ID replacement.
+- Preserve the MCP name, arguments, entry script, environment, working directory, timeouts, enabled state, and credentials. Do not install or enable MCP servers, modify their source trees, or migrate a working MCP merely because a newer CUA runtime exists.
+- Reparse `config.toml`, verify the MCP name set and every non-target field are unchanged, then use a user-accessible local Codex CLI whose content matches the installed package to run `codex mcp list`; never fall back to the protected WindowsApps CLI. Perform a real stdio JSON-RPC `initialize` plus `tools/list` smoke test for each migrated server. `node --version` alone is insufficient.
+- If initialization succeeds but an external backend is unavailable, report that dependency separately rather than calling the MCP fully healthy. If a migrated server fails its smoke test, restore the backup or revert that target mapping.
+
+`install-computer-use-local.ps1` does not automatically rewrite arbitrary `[mcp_servers.*].command` values. Its Chrome and Computer Use inventory supplies the current package-content matching rule, while this targeted MCP procedure adds the final-path containment check. Third-party MCP migration remains a separate configuration repair.
+
 ## Computer Use Screenshot Fails With 0x80004002 On Windows 10
 
 Symptoms:
