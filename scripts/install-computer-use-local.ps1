@@ -166,48 +166,6 @@ function Copy-DirectoryDataOnly {
   }
 }
 
-function Copy-DirectoryMissingOnly {
-  param(
-    [string]$Source,
-    [string]$Destination
-  )
-
-  if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
-    throw "copy source directory not found: $Source"
-  }
-
-  Resolve-OrCreateDirectory $Destination | Out-Null
-  $sourceRoot = (Resolve-Path -LiteralPath $Source).ProviderPath
-  $destinationRoot = (Resolve-Path -LiteralPath $Destination).ProviderPath
-
-  $robocopy = Get-Command robocopy.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($robocopy) {
-    & $robocopy.Source $sourceRoot $destinationRoot /E /XC /XN /XO /R:0 /W:0 /NFL /NDL /NP | Out-Null
-    $exitCode = $LASTEXITCODE
-    if ($exitCode -gt 7) {
-      throw "robocopy missing-only overlay failed with exit code $exitCode"
-    }
-    return
-  }
-
-  foreach ($dir in Get-ChildItem -LiteralPath $sourceRoot -Recurse -Directory -Force) {
-    $relative = $dir.FullName.Substring($sourceRoot.Length).TrimStart('\')
-    Resolve-OrCreateDirectory (Join-Path $destinationRoot $relative) | Out-Null
-  }
-
-  foreach ($file in Get-ChildItem -LiteralPath $sourceRoot -Recurse -File -Force) {
-    $relative = $file.FullName.Substring($sourceRoot.Length).TrimStart('\')
-    $target = Join-Path $destinationRoot $relative
-    if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
-      $targetParent = Split-Path -Parent $target
-      Resolve-OrCreateDirectory $targetParent | Out-Null
-      [System.IO.Directory]::CreateDirectory($targetParent) | Out-Null
-      [System.IO.File]::WriteAllBytes($target, [System.IO.File]::ReadAllBytes($file.FullName))
-      [System.IO.File]::SetLastWriteTime($target, $file.LastWriteTime)
-    }
-  }
-}
-
 function Set-TomlTable {
   param(
     [string]$ConfigPath,
@@ -1059,6 +1017,7 @@ function Stop-OpenAiBundledExtensionHosts {
   }
 
   $stopped = 0
+  $stoppedProcessIds = @()
   foreach ($process in (Get-Process -Name 'extension-host' -ErrorAction SilentlyContinue)) {
     $processPath = $null
     try {
@@ -1074,6 +1033,7 @@ function Stop-OpenAiBundledExtensionHosts {
       if ($processPath.StartsWith($rootPath + '\', [StringComparison]::OrdinalIgnoreCase)) {
         Write-Log "stopping bundled plugin lock holder: extension-host pid=$($process.Id)"
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        $stoppedProcessIds += $process.Id
         $stopped += 1
         break
       }
@@ -1081,7 +1041,12 @@ function Stop-OpenAiBundledExtensionHosts {
   }
 
   if ($stopped -gt 0) {
-    Start-Sleep -Seconds 2
+    foreach ($processId in $stoppedProcessIds) {
+      Wait-Process -Id $processId -Timeout 5 -ErrorAction SilentlyContinue
+      if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
+        throw "bundled plugin lock holder did not stop: extension-host pid=$processId"
+      }
+    }
   }
 }
 
@@ -1204,6 +1169,24 @@ function Get-BundledMarketplacePluginNames {
   return $pluginNames
 }
 
+function Get-BundledMarketplacePluginVersions {
+  param(
+    [string]$MarketplaceRoot,
+    [string[]]$PluginNames
+  )
+
+  if (-not $PluginNames -or $PluginNames.Count -eq 0) {
+    $PluginNames = @(Get-BundledMarketplacePluginNames $MarketplaceRoot)
+  }
+
+  $versions = @{}
+  foreach ($pluginName in $PluginNames) {
+    $pluginRoot = Join-Path $MarketplaceRoot "plugins\$pluginName"
+    $versions[$pluginName] = Get-PluginVersion $pluginRoot
+  }
+  return $versions
+}
+
 function Get-UsableCodexCliPath {
   param([string]$FailureContext)
 
@@ -1301,18 +1284,39 @@ function Test-AllBundledMarketplacePluginsAvailableWithCodexCli {
     throw "stable bundled marketplace descriptor set does not match the installed package: $detail"
   }
 
+  $installedPluginVersions = Get-BundledMarketplacePluginVersions $InstalledMarketplaceRoot $pluginNames
+  $stablePluginVersions = Get-BundledMarketplacePluginVersions $MarketplaceRoot $stablePluginNames
+  foreach ($pluginName in $pluginNames) {
+    $installedVersion = [string]$installedPluginVersions[$pluginName]
+    $stableVersion = [string]$stablePluginVersions[$pluginName]
+    if ($stableVersion -ne $installedVersion) {
+      throw "stable bundled marketplace descriptor version does not match the installed package for ${pluginName}: installed=$installedVersion stable=$stableVersion"
+    }
+  }
+
   $pluginList = Get-BundledMarketplacePluginListWithCodexCli -IncludeAvailable
   $entries = @($pluginList.installed) + @($pluginList.available)
   foreach ($pluginName in $pluginNames) {
     $selector = "$pluginName@openai-bundled"
-    $availablePlugin = @($entries | Where-Object {
+    $availablePlugins = @($entries | Where-Object {
       [string]$_.pluginId -eq $selector
-    } | Select-Object -First 1)
-    if ($availablePlugin.Count -eq 0) {
+    })
+    if ($availablePlugins.Count -eq 0) {
       throw "bundled plugin is not discoverable as installed or available: $selector"
     }
 
-    $sourcePath = [string]$availablePlugin[0].source.path
+    $installedVersion = [string]$installedPluginVersions[$pluginName]
+    foreach ($availablePlugin in $availablePlugins) {
+      $cliVersion = [string]$availablePlugin.version
+      if ([string]::IsNullOrWhiteSpace($cliVersion)) {
+        throw "bundled plugin CLI entry has no version: $selector"
+      }
+      if ($cliVersion -ne $installedVersion) {
+        throw "bundled plugin CLI version does not match the installed package for ${selector}: installed=$installedVersion cli=$cliVersion"
+      }
+    }
+
+    $sourcePath = [string]$availablePlugins[0].source.path
     $descriptorPath = if ([string]::IsNullOrWhiteSpace($sourcePath)) {
       $null
     } else {
@@ -1344,22 +1348,11 @@ function Sync-OpenAiBundledPluginCache {
   Stop-OpenAiBundledExtensionHosts @($sourcePluginRoot, $cacheRoot)
 
   Write-Log "syncing bundled plugin cache: $PluginName@$version"
-  $useMissingOnlyOverlay = $false
   if (Test-Path -LiteralPath $cacheVersionRoot) {
-    try {
-      Remove-ReparsePointOrDirectory $cacheVersionRoot
-    } catch {
-      $useMissingOnlyOverlay = $true
-      Write-Log "warning: bundled plugin cache is locked; overlaying missing files only: $cacheVersionRoot"
-      Write-Log "warning: cache delete failure: $($_.Exception.Message)"
-    }
+    Remove-ReparsePointOrDirectory $cacheVersionRoot
   }
 
-  if ($useMissingOnlyOverlay) {
-    Copy-DirectoryMissingOnly $sourcePluginRoot $cacheVersionRoot
-  } else {
-    Copy-DirectoryDataOnly $sourcePluginRoot $cacheVersionRoot
-  }
+  Copy-DirectoryDataOnly $sourcePluginRoot $cacheVersionRoot
 
   if (Test-Path -LiteralPath $latestPath) {
     Remove-ReparsePointOrDirectory $latestPath
@@ -1370,47 +1363,484 @@ function Sync-OpenAiBundledPluginCache {
   return $cacheVersionRoot
 }
 
-function Update-ChromeNativeMessagingManifest {
+function Get-ChromeNativeMessagingSettings {
   param([string]$ChromeCacheRoot)
 
-  $hostExe = Join-Path $ChromeCacheRoot 'extension-host\windows\x64\extension-host.exe'
-  if (-not (Test-Path -LiteralPath $hostExe -PathType Leaf)) {
-    throw "missing Chrome extension host executable: $hostExe"
-  }
-
-  $manifestPath = Join-Path $env:LOCALAPPDATA 'OpenAI\extension\com.openai.codexextension.json'
-  if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-    $json = [PSCustomObject]@{
-      allowed_origins = @('chrome-extension://hehggadaopoacecdllhhajmbjkdcmajg/')
-      description = 'Codex chrome native messaging host'
-      name = 'com.openai.codexextension'
-      path = $hostExe
-      type = 'stdio'
-    }
-    ConvertTo-JsonFile $manifestPath $json
-    & reg.exe add 'HKCU\Software\Google\Chrome\NativeMessagingHosts\com.openai.codexextension' /ve /t REG_SZ /d $manifestPath /f | Out-Null
-    Write-Log "created Chrome native messaging manifest: $manifestPath"
-    return
+  $extensionIdsPath = Join-Path $ChromeCacheRoot 'scripts\extension-ids.json'
+  if (-not (Test-Path -LiteralPath $extensionIdsPath -PathType Leaf)) {
+    throw "missing Chrome extension ID descriptor: $extensionIdsPath"
   }
 
   try {
-    $json = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+    $extensionIdsDocument = Get-Content -Raw -Encoding UTF8 -LiteralPath $extensionIdsPath | ConvertFrom-Json
   } catch {
-    Write-Log "warning: failed to parse Chrome native messaging manifest: $($_.Exception.Message)"
-    return
+    throw "failed to parse Chrome extension ID descriptor ${extensionIdsPath}: $($_.Exception.Message)"
   }
 
-  if ([string]$json.path -eq $hostExe) {
-    return
+  $extensionIds = @($extensionIdsDocument.extensionIds | ForEach-Object { ([string]$_).Trim() })
+  if ($extensionIds.Count -eq 0) {
+    throw "Chrome extension ID descriptor has no top-level extensionIds: $extensionIdsPath"
   }
 
-  $backupPath = "$manifestPath.$(Get-Date -Format 'yyyyMMdd-HHmmss-fff').bak"
-  Copy-Item -LiteralPath $manifestPath -Destination $backupPath -Force
-  $json.path = $hostExe
-  ConvertTo-JsonFile $manifestPath $json
-  & reg.exe add 'HKCU\Software\Google\Chrome\NativeMessagingHosts\com.openai.codexextension' /ve /t REG_SZ /d $manifestPath /f | Out-Null
-  Write-Log "updated Chrome native messaging manifest: $manifestPath"
-  Write-Log "Chrome native messaging manifest backup: $backupPath"
+  $seenExtensionIds = @{}
+  $allowedOrigins = @()
+  foreach ($extensionId in $extensionIds) {
+    if ($extensionId -cnotmatch '^[a-p]{32}$') {
+      throw "Chrome extension ID descriptor contains an invalid extension ID: $extensionId"
+    }
+    if ($seenExtensionIds.ContainsKey($extensionId)) {
+      throw "Chrome extension ID descriptor contains a duplicate extension ID: $extensionId"
+    }
+    $seenExtensionIds[$extensionId] = $true
+    $allowedOrigins += "chrome-extension://$extensionId/"
+  }
+
+  $hostName = [string]$extensionIdsDocument.extensionHostName
+  $registryRoot = [string]$extensionIdsDocument.windowsNativeMessaging.registryRoot
+  if ([string]::IsNullOrWhiteSpace($hostName)) {
+    throw "Chrome extension ID descriptor has no extensionHostName: $extensionIdsPath"
+  }
+  if ([string]::IsNullOrWhiteSpace($registryRoot) -or -not $registryRoot.StartsWith('HKCU\', [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Chrome extension ID descriptor has an invalid HKCU native messaging registry root: $extensionIdsPath"
+  }
+
+  return [pscustomobject]@{
+    AllowedOrigins = $allowedOrigins
+    BrowserClientPath = (Join-Path $ChromeCacheRoot 'scripts\browser-client.mjs')
+    ExtensionHostConfigPath = (Join-Path $ChromeCacheRoot 'extension-host\windows\x64\extension-host-config.json')
+    ExtensionIdsPath = $extensionIdsPath
+    HostExecutable = (Join-Path $ChromeCacheRoot 'extension-host\windows\x64\extension-host.exe')
+    HostName = $hostName
+    InstallManifestPath = (Join-Path $ChromeCacheRoot 'scripts\installManifest.mjs')
+    ManifestPath = (Join-Path $env:LOCALAPPDATA "OpenAI\extension\$hostName.json")
+    RegistryKey = "$registryRoot\$hostName"
+  }
+}
+
+function Test-FilesMatchByContent {
+  param(
+    [string]$CandidatePath,
+    [string]$ReferencePath
+  )
+
+  if (-not (Test-Path -LiteralPath $CandidatePath -PathType Leaf) -or -not (Test-Path -LiteralPath $ReferencePath -PathType Leaf)) {
+    return $false
+  }
+  if ((Get-Item -LiteralPath $CandidatePath).Length -ne (Get-Item -LiteralPath $ReferencePath).Length) {
+    return $false
+  }
+  return (Get-FileHash -LiteralPath $CandidatePath -Algorithm SHA256).Hash -eq
+    (Get-FileHash -LiteralPath $ReferencePath -Algorithm SHA256).Hash
+}
+
+function Get-CurrentCodexAppServerRuntimeInventory {
+  param(
+    [string]$PackageResourcesRoot,
+    [string]$LocalCodexRoot = (Join-Path $env:LOCALAPPDATA 'OpenAI\Codex')
+  )
+
+  if ([string]::IsNullOrWhiteSpace($PackageResourcesRoot)) {
+    $package = Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue |
+      Sort-Object Version -Descending |
+      Select-Object -First 1
+    if (-not $package) {
+      throw 'OpenAI.Codex package is not installed; cannot discover app-server runtime paths'
+    }
+    $PackageResourcesRoot = Join-Path $package.InstallLocation 'app\resources'
+  }
+
+  $packageCodex = Join-Path $PackageResourcesRoot 'codex.exe'
+  $packageCuaBin = Join-Path $PackageResourcesRoot 'cua_node\bin'
+  $packageNode = Join-Path $packageCuaBin 'node.exe'
+  $packageNodeRepl = Join-Path $packageCuaBin 'node_repl.exe'
+  foreach ($requiredPath in @($packageCodex, $packageNode, $packageNodeRepl)) {
+    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+      throw "current Codex package runtime is incomplete: $requiredPath"
+    }
+  }
+
+  $codexCandidates = @()
+  $localBinRoot = Join-Path $LocalCodexRoot 'bin'
+  if (Test-Path -LiteralPath $localBinRoot -PathType Container) {
+    foreach ($directory in @(Get-ChildItem -LiteralPath $localBinRoot -Directory -ErrorAction SilentlyContinue)) {
+      $candidate = Join-Path $directory.FullName 'codex.exe'
+      if ($candidate -notmatch '(?i)[\\/]\.plugin-appserver[\\/]' -and (Test-FilesMatchByContent $candidate $packageCodex)) {
+        $codexCandidates += [pscustomobject]@{ Path = $candidate; Priority = 0; LastWriteTime = (Get-Item $candidate).LastWriteTime }
+      }
+    }
+  }
+  $cuaCandidates = @()
+  $localCuaRoot = Join-Path $LocalCodexRoot 'runtimes\cua_node'
+  if (Test-Path -LiteralPath $localCuaRoot -PathType Container) {
+    foreach ($directory in @(Get-ChildItem -LiteralPath $localCuaRoot -Directory -ErrorAction SilentlyContinue)) {
+      $binRoot = Join-Path $directory.FullName 'bin'
+      $node = Join-Path $binRoot 'node.exe'
+      $nodeRepl = Join-Path $binRoot 'node_repl.exe'
+      if ((Test-FilesMatchByContent $node $packageNode) -and (Test-FilesMatchByContent $nodeRepl $packageNodeRepl)) {
+        $cuaCandidates += [pscustomobject]@{ NodePath = $node; NodeReplPath = $nodeRepl; BinRoot = $binRoot; Priority = 0; LastWriteTime = (Get-Item $node).LastWriteTime }
+      }
+    }
+  }
+  if ($codexCandidates.Count -eq 0) {
+    throw "no current user-local Codex CLI matches the installed package under $localBinRoot; launch Codex Desktop once so it can extract the current runtime"
+  }
+  if ($cuaCandidates.Count -eq 0) {
+    throw "no current user-local CUA Node runtime matches the installed package under $localCuaRoot; launch Codex Desktop once so it can extract the current runtime"
+  }
+
+  $selectedCodex = @($codexCandidates | Sort-Object Priority, @{ Expression = 'LastWriteTime'; Descending = $true } | Select-Object -First 1)[0]
+  $selectedCua = @($cuaCandidates | Sort-Object Priority, @{ Expression = 'LastWriteTime'; Descending = $true } | Select-Object -First 1)[0]
+  $nodeVersionOutput = @(& $selectedCua.NodePath --version 2>&1)
+  if ($LASTEXITCODE -ne 0 -or $nodeVersionOutput.Count -eq 0) {
+    throw "current user-local CUA Node runtime is not executable: $($selectedCua.NodePath)"
+  }
+  return [pscustomobject]@{
+    CodexCliPath = $selectedCodex.Path
+    NodePath = $selectedCua.NodePath
+    NodeReplPath = $selectedCua.NodeReplPath
+    AllowedCodexCliPaths = @($codexCandidates | ForEach-Object { $_.Path })
+    AllowedCuaBinRoots = @($cuaCandidates | ForEach-Object { $_.BinRoot })
+    ReferenceCodexCliPath = $packageCodex
+    ReferenceNodePath = $packageNode
+    ReferenceNodeReplPath = $packageNodeRepl
+    PackageResourcesRoot = $PackageResourcesRoot
+  }
+}
+
+function Resolve-ExistingFileProviderPath {
+  param([string]$Path)
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    throw "required file does not exist: $Path"
+  }
+  return (Resolve-Path -LiteralPath $Path).ProviderPath
+}
+
+function Get-FinalFileIdentityPath {
+  param([string]$Path)
+
+  $providerPath = Resolve-ExistingFileProviderPath $Path
+  if (-not ('CodexFinalPathResolver' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+public static class CodexFinalPathResolver {
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern SafeFileHandle CreateFile(
+    string fileName,
+    uint desiredAccess,
+    FileShare shareMode,
+    IntPtr securityAttributes,
+    FileMode creationDisposition,
+    uint flagsAndAttributes,
+    IntPtr templateFile
+  );
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern uint GetFinalPathNameByHandle(
+    SafeFileHandle file,
+    [Out] StringBuilder filePath,
+    uint filePathSize,
+    uint flags
+  );
+
+  public static string Resolve(string path) {
+    const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+    using (SafeFileHandle handle = CreateFile(
+      path,
+      0,
+      FileShare.ReadWrite | FileShare.Delete,
+      IntPtr.Zero,
+      FileMode.Open,
+      FILE_FLAG_BACKUP_SEMANTICS,
+      IntPtr.Zero
+    )) {
+      if (handle.IsInvalid) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to open path: " + path);
+      }
+      StringBuilder buffer = new StringBuilder(32768);
+      uint length = GetFinalPathNameByHandle(handle, buffer, (uint)buffer.Capacity, 0);
+      if (length == 0 || length >= buffer.Capacity) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to resolve final path: " + path);
+      }
+      string result = buffer.ToString();
+      if (result.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) {
+        result = @"\\" + result.Substring(8);
+      } else if (result.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase)) {
+        result = result.Substring(4);
+      }
+      return Path.GetFullPath(result);
+    }
+  }
+}
+'@
+  }
+  return [CodexFinalPathResolver]::Resolve($providerPath)
+}
+
+function Test-PathMatchesAnyCurrentFile {
+  param(
+    [string]$ActualPath,
+    [string[]]$ExpectedPaths
+  )
+
+  if (-not (Test-Path -LiteralPath $ActualPath -PathType Leaf)) {
+    return $false
+  }
+  $actualResolved = Get-FinalFileIdentityPath $ActualPath
+  foreach ($expectedPath in @($ExpectedPaths)) {
+    if (-not (Test-Path -LiteralPath $expectedPath -PathType Leaf)) {
+      continue
+    }
+    $expectedResolved = Get-FinalFileIdentityPath $expectedPath
+    if ($actualResolved -ieq $expectedResolved) {
+      return $true
+    }
+  }
+  return $false
+}
+
+function Get-CurrentChromeManifestRoots {
+  param([string]$ChromeCacheRoot)
+
+  $version = Get-PluginVersion $ChromeCacheRoot
+  $candidates = @($ChromeCacheRoot, (Join-Path (Split-Path -Parent $ChromeCacheRoot) 'latest'))
+  try {
+    $stableMarketplaceRoot = Get-StableBundledMarketplaceRoot (Resolve-OrCreateDirectory $CodexHome)
+    $stableDataRoot = Split-Path -Parent $stableMarketplaceRoot
+    $stableCacheRoot = Join-Path $stableDataRoot 'openai-bundled-cache\chrome'
+    $candidates += (Join-Path $stableCacheRoot $version), (Join-Path $stableCacheRoot 'latest')
+  } catch {
+    Write-Log "warning: unable to discover secondary stable Chrome cache root: $($_.Exception.Message)"
+  }
+
+  $roots = @()
+  $seen = @{}
+  foreach ($candidate in $candidates) {
+    $descriptor = Join-Path $candidate '.codex-plugin\plugin.json'
+    if (-not (Test-Path -LiteralPath $descriptor -PathType Leaf)) {
+      continue
+    }
+    try {
+      if ((Get-PluginVersion $candidate) -ne $version) {
+        continue
+      }
+    } catch {
+      continue
+    }
+    $key = [System.IO.Path]::GetFullPath($candidate).TrimEnd('\').ToLowerInvariant()
+    if (-not $seen.ContainsKey($key)) {
+      $seen[$key] = $true
+      $roots += $candidate
+    }
+  }
+  return $roots
+}
+
+function Invoke-ChromeOfficialManifestInstall {
+  param(
+    [string]$ChromeCacheRoot,
+    [object]$RuntimeInventory
+  )
+
+  $installManifestPath = Join-Path $ChromeCacheRoot 'scripts\installManifest.mjs'
+  if (-not (Test-Path -LiteralPath $installManifestPath -PathType Leaf)) {
+    throw "missing official Chrome manifest installer: $installManifestPath"
+  }
+  $driver = @'
+import { pathToFileURL } from "node:url";
+const installer = await import(pathToFileURL(process.argv[2]).href);
+const appServerRuntimePaths = {
+  codexCliPath: process.argv[3],
+  nodePath: process.argv[4],
+  nodeReplPath: process.argv[5],
+  proxyHost: "127.0.0.1",
+  proxyPort: 0,
+};
+await installer.install({ appServerRuntimePaths });
+'@
+  $driverPath = Join-Path $env:TEMP ('codex-chrome-install-manifest-' + [guid]::NewGuid().ToString('N') + '.mjs')
+  try {
+    Write-Utf8NoBom $driverPath $driver
+    $output = @(& $RuntimeInventory.NodePath $driverPath $installManifestPath $RuntimeInventory.CodexCliPath $RuntimeInventory.NodePath $RuntimeInventory.NodeReplPath 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+      throw "official Chrome manifest installer failed: $($output -join [Environment]::NewLine)"
+    }
+    Write-Log "official Chrome native-host and app-server config installed: codex=$($RuntimeInventory.CodexCliPath) node=$($RuntimeInventory.NodePath)"
+  } finally {
+    Remove-Item -LiteralPath $driverPath -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Test-OrdinalStringArrayEqual {
+  param(
+    [object[]]$Actual,
+    [object[]]$Expected
+  )
+
+  $actualStrings = @($Actual | ForEach-Object { [string]$_ })
+  $expectedStrings = @($Expected | ForEach-Object { [string]$_ })
+  if ($actualStrings.Count -ne $expectedStrings.Count) {
+    return $false
+  }
+  for ($index = 0; $index -lt $expectedStrings.Count; $index++) {
+    if (-not [string]::Equals($actualStrings[$index], $expectedStrings[$index], [System.StringComparison]::Ordinal)) {
+      return $false
+    }
+  }
+  return $true
+}
+
+function Convert-ChromeRegistryKeyToProviderPath {
+  param([string]$RegistryKey)
+
+  if ($RegistryKey.StartsWith('HKCU\', [System.StringComparison]::OrdinalIgnoreCase)) {
+    return 'Registry::HKEY_CURRENT_USER\' + $RegistryKey.Substring(5)
+  }
+  throw "unsupported Chrome native messaging registry key: $RegistryKey"
+}
+
+function Get-ChromeNativeMessagingRegistryManifestPath {
+  param([string]$RegistryKey)
+
+  $providerPath = Convert-ChromeRegistryKeyToProviderPath $RegistryKey
+  if (-not (Test-Path -LiteralPath $providerPath)) {
+    return $null
+  }
+  $key = Get-Item -LiteralPath $providerPath
+  return [string]$key.GetValue('', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+}
+
+function Test-ChromeNativeMessagingManifest {
+  param([string]$ChromeCacheRoot)
+
+  $settings = Get-ChromeNativeMessagingSettings $ChromeCacheRoot
+  if (-not (Test-Path -LiteralPath $settings.HostExecutable -PathType Leaf)) {
+    throw "missing Chrome extension host executable: $($settings.HostExecutable)"
+  }
+  if (-not (Test-Path -LiteralPath $settings.ManifestPath -PathType Leaf)) {
+    throw "missing Chrome native messaging manifest: $($settings.ManifestPath)"
+  }
+
+  try {
+    $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $settings.ManifestPath | ConvertFrom-Json
+  } catch {
+    throw "failed to parse Chrome native messaging manifest $($settings.ManifestPath): $($_.Exception.Message)"
+  }
+  if ([string]$manifest.name -cne $settings.HostName -or [string]$manifest.type -cne 'stdio') {
+    throw "Chrome native messaging manifest identity or type is stale: $($settings.ManifestPath)"
+  }
+  $currentHostPaths = @(Get-CurrentChromeManifestRoots $ChromeCacheRoot | ForEach-Object {
+    Join-Path $_ 'extension-host\windows\x64\extension-host.exe'
+  })
+  if (-not (Test-PathMatchesAnyCurrentFile ([string]$manifest.path) $currentHostPaths)) {
+    throw "Chrome native messaging manifest does not point at the current stable cache host: $($settings.ManifestPath)"
+  }
+  if (-not (Test-OrdinalStringArrayEqual -Actual @($manifest.allowed_origins) -Expected @($settings.AllowedOrigins))) {
+    throw "Chrome native messaging manifest allowed_origins do not match $($settings.ExtensionIdsPath): $($settings.ManifestPath)"
+  }
+
+  $registeredManifestPath = Get-ChromeNativeMessagingRegistryManifestPath $settings.RegistryKey
+  if ([string]::IsNullOrWhiteSpace($registeredManifestPath) -or $registeredManifestPath -ine $settings.ManifestPath) {
+    throw "Chrome native messaging registry does not point at the current manifest: $($settings.RegistryKey)"
+  }
+  Write-Log "Chrome native messaging manifest verification ok: origins=$($settings.AllowedOrigins.Count)"
+}
+
+function Test-ChromeAppServerHostConfig {
+  param(
+    [string]$ChromeCacheRoot,
+    [pscustomobject]$ExpectedRuntimePaths
+  )
+
+  if (-not $ExpectedRuntimePaths) {
+    $ExpectedRuntimePaths = Get-CurrentCodexAppServerRuntimeInventory
+  }
+  $settings = Get-ChromeNativeMessagingSettings $ChromeCacheRoot
+  if (-not (Test-Path -LiteralPath $settings.ManifestPath -PathType Leaf)) {
+    throw "Chrome native messaging manifest is missing: $($settings.ManifestPath)"
+  }
+  try {
+    $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $settings.ManifestPath | ConvertFrom-Json
+  } catch {
+    throw "failed to parse Chrome native messaging manifest $($settings.ManifestPath): $($_.Exception.Message)"
+  }
+  $currentChromeRoots = @(Get-CurrentChromeManifestRoots $ChromeCacheRoot)
+  $currentHostPaths = @($currentChromeRoots | ForEach-Object {
+    Join-Path $_ 'extension-host\windows\x64\extension-host.exe'
+  })
+  $hostExecutable = [string]$manifest.path
+  if (-not (Test-PathMatchesAnyCurrentFile $hostExecutable $currentHostPaths)) {
+    throw "Chrome app-server host config is not beside a current stable cache host: $hostExecutable"
+  }
+  $configPath = Join-Path (Split-Path -Parent $hostExecutable) 'extension-host-config.json'
+  if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+    throw "Chrome app-server host config is missing: $configPath"
+  }
+  try {
+    $config = Get-Content -Raw -Encoding UTF8 -LiteralPath $configPath | ConvertFrom-Json
+  } catch {
+    throw "failed to parse Chrome app-server host config ${configPath}: $($_.Exception.Message)"
+  }
+  if ([int]$config.schemaVersion -ne 1) {
+    throw "Chrome app-server host config has an unsupported schemaVersion: $configPath"
+  }
+  if ([string]$config.channel -cne 'prod') {
+    throw "Chrome app-server host config has an unexpected channel: $configPath"
+  }
+  if ([string]$config.proxyHost -cne '127.0.0.1' -or [int]$config.proxyPort -ne 0) {
+    throw "Chrome app-server host config has invalid proxy settings: $configPath"
+  }
+
+  $browserClientPath = [string]$config.browserClientPath
+  $currentBrowserClientPaths = @($currentChromeRoots | ForEach-Object {
+    Join-Path $_ 'scripts\browser-client.mjs'
+  })
+  if ($browserClientPath -match '(?i)\\\.tmp\\bundled-marketplaces\\' -or
+      -not (Test-PathMatchesAnyCurrentFile $browserClientPath $currentBrowserClientPaths)) {
+    throw "Chrome app-server host config browserClientPath does not point at a current stable cache: $browserClientPath"
+  }
+
+  $codexCliPath = [string]$config.codexCliPath
+  if ([string]::IsNullOrWhiteSpace($codexCliPath) -or -not (Test-Path -LiteralPath $codexCliPath -PathType Leaf)) {
+    throw "Chrome app-server host config is missing required path codexCliPath: $codexCliPath"
+  }
+  if ($codexCliPath -match '(?i)[\\/]WindowsApps[\\/]' -or $codexCliPath -match '(?i)[\\/]\.plugin-appserver[\\/]') {
+    throw "Chrome app-server host config codexCliPath is not a supported user-local runtime: $codexCliPath"
+  }
+  if (-not (Test-PathMatchesAnyCurrentFile $codexCliPath @($ExpectedRuntimePaths.AllowedCodexCliPaths))) {
+    throw "Chrome app-server host config codexCliPath does not match the current Codex runtime: $codexCliPath"
+  }
+
+  $nodePath = [string]$config.nodePath
+  $nodeReplPath = [string]$config.nodeReplPath
+  foreach ($runtimeEntry in @(
+    [pscustomobject]@{ Label = 'nodePath'; Path = $nodePath },
+    [pscustomobject]@{ Label = 'nodeReplPath'; Path = $nodeReplPath }
+  )) {
+    if ([string]::IsNullOrWhiteSpace($runtimeEntry.Path) -or -not (Test-Path -LiteralPath $runtimeEntry.Path -PathType Leaf)) {
+      throw "Chrome app-server host config is missing required path $($runtimeEntry.Label): $($runtimeEntry.Path)"
+    }
+    if ($runtimeEntry.Path -match '(?i)[\\/]WindowsApps[\\/]') {
+      throw "Chrome app-server host config runtime points at a protected WindowsApps executable: $($runtimeEntry.Path)"
+    }
+  }
+  $matchedCuaRuntime = $false
+  foreach ($binRoot in @($ExpectedRuntimePaths.AllowedCuaBinRoots)) {
+    if ((Test-PathMatchesAnyCurrentFile $nodePath @((Join-Path $binRoot 'node.exe'))) -and
+        (Test-PathMatchesAnyCurrentFile $nodeReplPath @((Join-Path $binRoot 'node_repl.exe')))) {
+      $matchedCuaRuntime = $true
+      break
+    }
+  }
+  if (-not $matchedCuaRuntime) {
+    throw "Chrome app-server host config nodePath and nodeReplPath do not match one current CUA runtime: $configPath"
+  }
+  Write-Log "Chrome app-server host config verification ok: $configPath"
 }
 
 function Sync-BundledMarketplaceFromInstalledApp {
@@ -1424,7 +1854,8 @@ function Sync-BundledMarketplaceFromInstalledApp {
   Assert-UnderPath $MarketplaceRoot $parent
   Stop-OpenAiBundledExtensionHosts @(
     $MarketplaceRoot,
-    (Join-Path $CodexHome 'plugins\cache\openai-bundled')
+    (Join-Path $CodexHome 'plugins\cache\openai-bundled'),
+    (Join-Path (Split-Path -Parent $MarketplaceRoot) 'openai-bundled-cache')
   )
 
   Write-Log "syncing installed openai-bundled marketplace: $SourceRoot -> $MarketplaceRoot"
@@ -2016,6 +2447,10 @@ function Install-ComputerUse {
   $computerUseCacheRoot = Sync-OpenAiBundledPluginCache $installedMarketplaceRoot 'computer-use'
   Write-PluginTree $computerUseCacheRoot
   $browserCacheRoot = Sync-OpenAiBundledPluginCache $installedMarketplaceRoot 'browser'
+  Stop-OpenAiBundledExtensionHosts @(
+    (Join-Path $codexHomeResolved 'plugins\cache\openai-bundled\chrome'),
+    (Join-Path (Split-Path -Parent $marketplaceRoot) 'openai-bundled-cache\chrome')
+  )
   $chromeCacheRoot = Sync-OpenAiBundledPluginCache $installedMarketplaceRoot 'chrome'
   Patch-ChromeWindowsRegistryParsing $chromeCacheRoot
   $sitesInstalled = Test-BundledMarketplacePluginInstalledWithCodexCli 'sites'
@@ -2024,7 +2459,8 @@ function Install-ComputerUse {
     Write-Log "refreshed existing optional plugin cache: $sitesCacheRoot"
   }
 
-  Update-ChromeNativeMessagingManifest $chromeCacheRoot
+  $runtimeInventory = Get-CurrentCodexAppServerRuntimeInventory
+  Invoke-ChromeOfficialManifestInstall $chromeCacheRoot $runtimeInventory
 
   # Desktop can reconcile the mutable mirror while caches are being copied.
   # Re-merge shipped descriptors immediately before final verification.
@@ -2045,6 +2481,12 @@ function Install-ComputerUse {
 function Test-ComputerUse {
   $codexHomeResolved = Resolve-ExistingDirectory $CodexHome
   $installedMarketplaceRoot = Get-InstalledBundledMarketplaceRoot
+  $installedChromeRoot = Join-Path $installedMarketplaceRoot 'plugins\chrome'
+  $installedChromeVersion = Get-PluginVersion $installedChromeRoot
+  $installedChromeCacheRoot = Join-Path $codexHomeResolved "plugins\cache\openai-bundled\chrome\$installedChromeVersion"
+  $runtimeInventory = Get-CurrentCodexAppServerRuntimeInventory
+  Test-ChromeNativeMessagingManifest $installedChromeCacheRoot
+  Test-ChromeAppServerHostConfig $installedChromeCacheRoot $runtimeInventory
   if ($VerifyAllBundledPluginsAvailable) {
     $stableMarketplaceRoot = Get-StableBundledMarketplaceRoot $codexHomeResolved
     Test-AllBundledMarketplacePluginsAvailableWithCodexCli $stableMarketplaceRoot $installedMarketplaceRoot
@@ -2091,9 +2533,7 @@ function Test-ComputerUse {
     $sitesCacheLatest = Join-Path $codexHomeResolved 'plugins\cache\openai-bundled\sites\latest'
     $sitesCacheVersionRoot = Join-Path $codexHomeResolved "plugins\cache\openai-bundled\sites\$sitesVersion"
   }
-  $chromeNativeManifest = Join-Path $env:LOCALAPPDATA 'OpenAI\extension\com.openai.codexextension.json'
   $chromeHostPath = Join-Path $chromeCacheVersionRoot 'extension-host\windows\x64\extension-host.exe'
-  $chromeLatestHostPath = Join-Path $chromeCacheLatest 'extension-host\windows\x64\extension-host.exe'
   $marketplaceBrowserClientPath = Join-Path $chromePluginRoot 'scripts\browser-client.mjs'
   $cachedBrowserClientPath = Join-Path $chromeCacheVersionRoot 'scripts\browser-client.mjs'
   $computerUseClientPath = Join-Path $cacheLatest 'scripts\computer-use-client.mjs'
@@ -2174,17 +2614,6 @@ function Test-ComputerUse {
     $target = [string]($item.Target -join ';')
     if ($target.StartsWith($marketplaceRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
       throw "bundled plugin latest junction points at mutable marketplace mirror: $latestPath -> $target"
-    }
-  }
-
-  if (Test-Path -LiteralPath $chromeNativeManifest -PathType Leaf) {
-    $nativeManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $chromeNativeManifest | ConvertFrom-Json
-    $nativeHostPath = [string]$nativeManifest.path
-    if (-not (Test-Path -LiteralPath $nativeHostPath -PathType Leaf)) {
-      throw "Chrome native messaging manifest points at a missing host: $chromeNativeManifest"
-    }
-    if ($nativeHostPath -ine $chromeHostPath -and $nativeHostPath -ine $chromeLatestHostPath) {
-      throw "Chrome native messaging manifest does not point at stable cache path: $chromeNativeManifest"
     }
   }
 

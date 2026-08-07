@@ -180,7 +180,8 @@ Get-ChildItem -LiteralPath $root -Recurse -File |
 ```
 
 - Inspect the extracted main bundle or live ASAR for `isAvailable:({features:e})=>e.sites` near the bundled plugin descriptors. That shape means package resources can contain `sites`, but runtime filtering can still remove it when `features.sites` is false.
-- Confirm that every descriptor declared by the current package has a matching plugin directory under the stable root. Do not install or enable optional plugins merely to make this check pass; use `-StrictVerifyOnly -VerifyAllBundledPluginsAvailable` for structured availability validation.
+- Confirm that every descriptor declared by the current package has a matching plugin directory and identical descriptor version under the stable root, and that the CLI installed-or-available JSON reports that same version. Do not install or enable optional plugins merely to make this check pass; use `-StrictVerifyOnly -VerifyAllBundledPluginsAvailable` for structured availability validation.
+- For Chrome native-host failures, compare the manifest's `allowed_origins` with the top-level `extensionIds` in the current versioned Chrome cache's `scripts\extension-ids.json`, even when the manifest host `path` is already correct. If the side panel says `Codex app-server manifest entry is missing required path nodePath`, require `extension-host-config.json` beside the current `extension-host.exe`; its `codexCliPath` must match the installed package CLI by content, and `nodePath` / `nodeReplPath` must come from the same current `cua_node` runtime. Normal repair must call the current plugin's official `installManifest.mjs`; `-StrictVerifyOnly` must reject origin, registry, config-schema, missing-path, stale-runtime, and mutable-cache drift.
 
 Action:
 
