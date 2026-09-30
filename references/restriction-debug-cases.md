@@ -784,6 +784,12 @@ Real no-login acceptance on Windows with Desktop `26.917.9434.1` and service `26
 
 Desktop `26.924.2738.0` ships service `26.924.22138`, not `26.924.20706`. Its exact source passes 48 guard/behavior checks and 26 isolated cache-scope checks against the older `26.917.71314` profile. The live browser-client contract test also accepts the reconstructed service overlay while requiring the packaged client bytes. These checks do not prove browser execution: on an unpatched Store install with external cache junctions, the separate Desktop trusted-path generator can still reject the service before any Chrome command runs. Repair that proven ASAR gate through the guarded external-executor workflow, then retest actual navigation and input.
 
+## Windows PowerShell 5.1 Rejects Valid TOML Passed Through Native Stdin
+
+If local repair reports `TOML syntax validation failed; configuration was not written.` even for a minimal valid document, verify the transport before changing the configuration. Windows PowerShell 5.1 can prefix the bytes piped to Python with `efbbbf` despite a no-BOM `$OutputEncoding`. The previous validator decoded native stdin with `utf-8`, so `tomllib` rejected the transport prefix; the real configuration can remain valid and unchanged.
+
+The shared validator now decodes stdin with `utf-8-sig`. The independent JSON transport in the round-trip regression uses the same decoding, while the oracle still checks that generated TOML files have no BOM and that malformed candidates do not reach backup/write. Run `test-toml-config-writing.ps1 -TemporaryRoot <dir>` with Python 3.11+ under both Windows PowerShell 5.1 and pwsh; each host passed 108 cases and 349 checks. The real `-VerifyOnly` local repair also passed on Windows PowerShell 5.1 after this fix. Do not interpret this local validator failure as evidence that a newly installed ASAR cannot launch, or fold it into the client launch rollback predicate.
+
 ## Replacement Installation Removes Codex Then Fails With 0x80073D28
 
 The package can have a valid signature and fully validated ASAR while still requiring administrator privileges for `windows.service`, `packagedServices`, or `localSystemServices`. On `26.917.9434.0`, a non-elevated external installer removed the Store package, then `Add-AppxPackage` rejected registration of its LocalSystem sandbox service with `0x80073D28`. The old uninstall-first function had no rollback. Do not attribute this to a model patch or treat an artifact check as a deployment preflight.
