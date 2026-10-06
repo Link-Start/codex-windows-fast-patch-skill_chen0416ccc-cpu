@@ -608,8 +608,6 @@ If `-StrictVerifyOnly` fails because a cache path is missing or stale, run `-Ver
 
 ## Backup Management
 
-For completed repair artifacts, use the normal scoped cleanup when the executor permits it. If a permanent deletion is rejected before execution, do not merely hand the user a recursive-delete command: follow [recoverable artifact retirement](references/artifact-retirement.md), prepare and inspect a manifest with explicit paths and a recorded verification mode, then use the same-volume quarantine operation when permitted. It preserves data and supports automatic restoration; it is not permanent deletion and frees no disk space. Do not weaken approval settings, disguise or externally dispatch a denied delete, or claim that a skill can guarantee approval under every host policy.
-
 To back up local Codex config, MCP server entries, custom skills, marketplaces, and Chrome native-host state:
 
 ```powershell
