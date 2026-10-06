@@ -4,6 +4,20 @@ Use this reference only when the main `SKILL.md` workflow does not explain the c
 
 Commands below refer to the skill directory as `$SkillRoot`. Resolve it with the probe in the `Skill Root` section of `SKILL.md` before running any of them.
 
+## Browser AX Reports Decompression Failed
+
+If both Chrome and the in-app browser fail on `tab.ax.get('state')`, reproduce on a blank tab and inspect the service selected by `NODE_REPL_TRUSTED_SERVICES`. The Chrome client can dispatch to the separate **browser** plugin service; validating only Chrome's assets misses that path. Inspect `BROWSER_USE_ACCESSIBILITY_CORE_WASM_PATH` if an override is present.
+
+PR #86 reports a corrupted compressed asset in a locally repacked Desktop `26.928.3736.3`, with an equivalent healthy Chrome asset. Its origin is unconfirmed; this does not establish a defect in the official release. Matching a damaged package hash alone cannot prove asset health.
+
+`install-computer-use-local.ps1 -StrictVerifyOnly` now decompresses and validates the AX WASM assets for browser, Chrome and the selected standalone browser-desktop runtime. `-VerifyOnly` repairs missing/corrupt mutable assets after refreshing caches. A damaged packaged plugin asset can use a healthy sibling from that same installed marketplace only when the descriptor version and complete service bytes match. Healthy but different cache bytes, mixed versions, or the absence of a compatible healthy packaged source fail before asset writes. Standalone runtimes use their own packaged source. Stale runtimes and unrelated plugins are outside the selected scope.
+
+The repair backs up changed assets, leaves package sources and trusted clients unchanged, and refuses WindowsApps targets including resolved junctions. It does not change account/configuration, security checks or the loader. If no equivalent packaged source exists, obtain a verified matching package through the normal repair workflow rather than guessing compressed bytes or borrowing another version.
+
+Reset the Node REPL kernel after repair because failed WASM initialization is cached. Require actual Chrome **and** in-app-browser AX state reads, text entry, button clicks and visible results, then repeat in a fresh kernel. DOM/Playwright success does not satisfy AX acceptance. Contributor-reported browser acceptance is separate from the maintainer's isolated regression checks.
+
+Regression command: `node scripts/test-browser-accessibility-assets.cjs`. Optional arguments `<healthy-wasm.br> <corrupt-wasm.br>` replay an asset pair without adding vendor binaries. The suite covers source recovery, version/service mismatch, preflight, backups, idempotence and Chinese-path success/failure in PowerShell 5.1/7. The wrapper restores the caller's encoding; a missing package or plugin descriptor fails rather than reporting zero assets as verified. A known layout without either AX loader reports not applicable.
+
 ## Model Experience Is Partially Broken
 
 Symptoms:
@@ -855,7 +869,11 @@ On Desktop `26.915.4065.0`, native app enumeration can work and Chrome can conne
 
 The Node REPL config builder replaces `env_vars` during Desktop reconciliation. A manual edit to the materialized plugin manifest or `config.toml` can therefore disappear on restart. The repair adds the existing standard HTTP/HTTPS/ALL/NO proxy variable names to the Windows native builder, preserving existing entries and deduplicating them. Unset variables, credentials under other names, macOS, Linux, and WSL paths are left unchanged. Proxy values are inherited at launch and are never embedded in the bundle.
 
-Run `scripts/test-node-repl-proxy-env.cjs`, then a full dry run. After installing the updated MSIX from an external executor, verify the real CUA child environment and a controlled browser tab. Restarting only its JavaScript kernel does not restart the MCP process.
+Use `python scripts/probe-node-repl-proxy-env.py --pid <root-pid> --pid <current-cua-child-pid>` with x64 Python on x64 Windows to compare proxy variable names without printing their values. Identify the real persistent Desktop root and current `node_repl.exe` or `node.exe ... cua-repl.mjs` children first. The probe reads aligned UTF-16 entries across readable memory regions up to 4 MiB. Success requires the double-null terminator and stable environment pointers; partial/unreadable memory, malformed data or the limit produce `complete=false` and exit 1, with no absence claim. Presence alone does not prove proxy connectivity or browser policy acceptance.
+
+When the root has the required proxy but its native CUA child loses it, run `scripts/patch_codex_fast_mode_windows_msix.ps1 -OnlyNodeReplProxyEnv -DryRun`. If both the native CUA surface and proxy inheritance are broken, use `-OnlyComputerUseSurfaceAndProxyEnv -DryRun`. These opt-in modes patch only their selected ASAR targets and reject unrelated repair switches. Use the existing signed MSIX and independent installer workflow if deployment is actually needed; a missing proxy in the root requires launch-environment diagnosis instead.
+
+Run `node scripts/test-node-repl-proxy-env.cjs`, `powershell -NoProfile -File scripts/test-node-repl-proxy-targeted-mode.ps1` and `python -B scripts/test-probe-node-repl-proxy-env.py`. They verify behavior, scope/idempotence/no-write failure paths and synthetic plus task-owned process reads. They do not establish a newly installed Desktop's proxy routing. After a real deployment, verify the CUA child environment and a controlled browser tab. Restarting only its JavaScript kernel does not restart the MCP process.
 
 ## Windows CUA Entry Instructions Use an Unsupported App Name
 

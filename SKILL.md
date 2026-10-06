@@ -60,6 +60,7 @@ Rules:
 - If `$SkillRoot` has no `.git` directory, the copy was installed by copying files or through a harness plugin mechanism and can never self-update. Report that, keep working with the installed version, and suggest reinstalling with `git clone` so future updates work.
 
 If the normal workflow does not explain a restriction, plugin gate, Computer Use failure, browser_use failure, or Fast Mode failure, read `references/restriction-debug-cases.md` before editing scripts or repatching.
+For browser AX `Decompression failed`, use the AX asset case in that reference. For missing CUA child proxy variables, use its read-only process probe before selecting the opt-in `-OnlyNodeReplProxyEnv` or `-OnlyComputerUseSurfaceAndProxyEnv` repair; missing root-process proxy settings alone do not justify a package patch.
 If the task is phone remote control, QR pairing, mobile setup, isolated remote OAuth, remote-control WebSocket, or post-pairing API endpoint diagnosis, read `references/remote-control-debug-cases.md` before editing scripts or repatching.
 
 ## Config Backup Rule
