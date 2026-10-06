@@ -30,6 +30,13 @@ def memory(data, region_sizes=None):
 
 
 class ProbeTests(unittest.TestCase):
+    def test_optional_proxy_names_do_not_hide_required_names(self):
+        raw = ("\0".join(f"{name}=private" for name in probe.PROXY_NAMES) + "\0\0").encode("utf-16-le")
+        names = probe.read_environment(memory(raw), 0x1000)
+        self.assertEqual(names, list(probe.PROXY_NAMES))
+        self.assertTrue({"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}.issubset(names))
+        self.assertEqual(len(names), 6)
+
     def test_long_environment(self):
         raw = ("AAA=" + "x" * 20000 + "\0https_proxy=private-value\0NO_PROXY=localhost\0\0").encode("utf-16-le")
         self.assertEqual(probe.read_environment(memory(raw), 0x1000), ["HTTPS_PROXY", "NO_PROXY"])

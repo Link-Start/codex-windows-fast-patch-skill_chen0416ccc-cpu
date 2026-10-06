@@ -67,8 +67,12 @@ For Claude Code, change the destination to `$env:USERPROFILE\.claude\skills\code
 ```text
 Use codex-windows-fast-patch to inspect and repair the model-list,
 browser, and computer-control issues after my Codex update. Preserve my
-configuration and conversations, verify real operations, and clean up temporary files.
+configuration and conversations, run background verification, and clean up temporary files.
 ```
+
+Verification defaults to background read-only checks. It does not automatically open Calculator or another test app, change native-window focus, or inject mouse/keyboard input. Runtime, plugin, and window-enumeration results are reported separately. Live native screenshot/input tests run only when explicitly requested or authorized, and untested operations are identified as such.
+
+When execution policy denies permanent artifact deletion, the agent can use [recoverable retirement](references/artifact-retirement.md): verify a manifest, move artifacts on the same drive, and retain a restoration journal. This clears build locations without freeing disk space, changing approval settings, or bypassing the denial.
 
 **Request phone remote control separately:**
 
