@@ -824,6 +824,12 @@ Use `lib/msix-safe-install.ps1`: build a higher package revision, validate deplo
 
 Keep original program bytes in a signed higher-revision recovery MSIX until actual launch and runtime acceptance pass. The normal three patcher entrypoints perform guarded in-place deployment but do not automatically build a recovery MSIX or run a startup-recovery transaction. An external executor may call `Invoke-RecoverableMsixInstall` with a separately prepared recovery package and a real `ValidateInstalledPackage` callback. If startup validation fails after a successful update, that helper deploys the prepared recovery package once, in place. Keep logs for both update and recovery; never claim success from `Add-AppxPackage` or signing alone. `scripts/test-msix-safe-install.ps1` covers the no-uninstall contract, manifest/version preservation, non-admin rejection, identity/signature gates, same/other-version Desktop ancestry, deployment failure, and simulated startup recovery. These fixture tests are not live installation proof.
 
+## MSIX Signature Reports Unknown Format When TEMP Does Not Exist
+
+An external executor that changes `TEMP` and `TMP` must create the selected directory before setting those variables or checking an MSIX signature. On Windows PowerShell 5.1 with Desktop `26.1002.7124.0`, the same signed update and recovery packages returned `Valid` under the normal temporary directory, then `UnknownError` with a trust-provider unsupported-format message when the executor pointed both variables at a missing D-drive directory. Creating that exact directory restored `Valid` for both packages without changing their bytes, signer, publisher, or certificate trust.
+
+For this specific error, compare the executor's actual temporary directory and existence with the successful diagnostic context before rebuilding or changing certificates. Create the task-owned staging directory with `New-Item -ItemType Directory -Force -ErrorAction Stop`, then set process-local `TEMP`/`TMP`. Repeat the unchanged signature, publisher, payload, privilege, and version checks in the independent executor. The misleading signature error is not an approval-policy rejection; do not relax signature validation, uninstall the working app, or assume that a successful check in a different environment proves the deployment environment is ready.
+
 ## Patched Package Installs But Codex Desktop Never Starts
 
 Symptoms:
