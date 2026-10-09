@@ -137,6 +137,7 @@ git -C $SkillRoot pull --ff-only
 | 模型、浏览器、插件或安装故障 | [常见问题排查](references/restriction-debug-cases.md) |
 | 手机远控的授权、配对和 API 问题 | [手机远控排查](references/remote-control-debug-cases.md) |
 | Win10 截图的适用版本与验证范围 | [Win10 截图兼容说明](references/win10-computer-use-screenshot-backend.md) |
+| 本机是 Win11，如何分析和验证 Win10 截图问题 | [Win10 客体与独立验证工具](references/win10-validation-on-win11.md) |
 
 仍有问题请[提交 issue](https://github.com/chen0416ccc-cpu/codex-windows-fast-patch-skill/issues/new)，附上 Windows / Codex 版本、问题现象和脱敏日志。不要上传 `auth.json`、API key、OAuth token 或浏览器资料；敏感信息处理见 [SECURITY.md](SECURITY.md)。
 

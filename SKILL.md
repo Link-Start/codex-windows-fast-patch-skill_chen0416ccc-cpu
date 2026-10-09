@@ -140,6 +140,8 @@ If a screenshot or input defect specifically needs reproduction, first explain t
 
 If the user presses Escape, stops Computer Use, closes the test window, or resumes work in the target, stop the interactive test and report its last completed step. Do not automatically reopen the test app, retry input, or switch to another control mechanism. Background checks and the repair report can still be completed without further desktop input.
 
+For Windows 10 screenshot issues investigated from a Windows 11 host, follow `references/win10-validation-on-win11.md`. `scripts\diagnose-win10-helper-capture.ps1` is read-only by default; `-BuildTargetOnly` compiles a dedicated target without launching it. An explicitly authorized `-RunCapture` uses a Windows 10 guest/test console, isolated helper copies and disposable Codex homes. `-TestInput` separately opts into clicks/text confined to that target. The script rejects Windows 11/Server capture and never installs a patch into the active helper. Compilation, candidate hashes and diagnostic guard tests do not establish Windows 10 capture acceptance.
+
 ## Default Workflow
 
 1. If the task may modify `config.toml`, skills, marketplaces, or MCP server settings, create a state snapshot first:
@@ -578,7 +580,7 @@ $helperPatcher = "$SkillRoot\scripts\patch-computer-use-helper-win10.ps1"
 powershell -NoProfile -ExecutionPolicy Bypass -File $helperPatcher
 ```
 
-Only an `original-patchable` result for one of the documented complete helper SHA-256 profiles authorizes further evaluation. A real write additionally requires Windows 10 and the documented border-interface or frame-callback screenshot failure; a matching hash on Windows 11 is not authorization. Profiles include the older border-interface builds and newer callback-timeout builds through `@oai/sky 0.7.6-F78948E6` / Desktop `26.1002.6548.0`. The newer profile has independent binary/candidate/unwind verification; Windows 10 capture/input acceptance remains pending. The helper hash, not the Desktop version, is the binary compatibility boundary, and identical reported versions can still cover different binaries:
+Only an `original-patchable` result for one of the documented complete helper SHA-256 profiles authorizes further evaluation. A real write additionally requires Windows 10 and the documented border-interface or frame-callback screenshot failure; a matching hash on Windows 11 is not authorization. Profiles include the older border-interface builds and newer callback-timeout builds through `@oai/sky 0.7.6-F78948E6` and `0.7.6-63C98C4D` from issue #93. Both have independent binary/candidate/unwind verification; Windows 10 capture/input acceptance remains pending. The helper hash, not the Desktop version, is the binary compatibility boundary, and identical reported versions can still cover different binaries:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File $helperPatcher -Install
